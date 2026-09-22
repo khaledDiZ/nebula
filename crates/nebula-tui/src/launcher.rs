@@ -775,6 +775,11 @@ pub struct ProjectTab {
     /// The header's own cursor is on it: the PROJECT TABS have the keys
     /// ([`App::launcher_tab_cursor`]) and the grid is showing this one.
     pub focused: bool,
+    /// Any checkout of this project is mixing isolated paths with other
+    /// work ([`crate::split_guard`]). A rule broken in a project you are
+    /// not looking at is exactly the one you find out about at review
+    /// time, so the tab carries it.
+    pub split: bool,
 }
 
 /// The PROJECT TABS across the LAUNCHER VIEW's header: every project
@@ -807,6 +812,11 @@ pub fn project_tabs(app: &App) -> Vec<ProjectTab> {
                 tally: project_tally(app, id),
                 active: active.as_ref() == Some(id),
                 focused: app.launcher_tab_cursor.as_ref() == Some(id),
+                split: app
+                    .tree
+                    .worktrees
+                    .iter()
+                    .any(|w| &w.project_id == id && app.worktree_split(&w.id)),
             })
         })
         .collect()

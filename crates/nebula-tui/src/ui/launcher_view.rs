@@ -363,6 +363,14 @@ fn project_chip(
             .into_iter()
             .map(|dot| Span::styled(dot.content, fill(dot.style))),
     );
+    // The SPLIT GUARD, after the dots: a checkout of this project is
+    // carrying a migration and code in one change. It rides the tab
+    // because the rule is broken in the project you are *not* looking at
+    // as easily as in this one, and a chip on a card nobody is on says
+    // nothing until review.
+    if tab.split {
+        label.push(Span::styled(" \u{26a0}", fill(Style::default().fg(th.err))));
+    }
     let cross = if hover == Some(&HitTarget::LauncherTabClose(tab.id.clone())) {
         th.err
     } else if tab.active {
@@ -805,6 +813,16 @@ fn draw_card(
             second.push(Span::styled(added, Style::default().fg(quiet_or(th.ok))));
             second.push(Span::styled(removed, Style::default().fg(quiet_or(th.err))));
         }
+    }
+    // A checkout the work folder does not hold — a temp directory, a
+    // scratchpad an old session left behind. Named before the directory,
+    // because "this is not where you think it is" outranks "it is called
+    // something else".
+    if app.worktree_is_away(&a.worktree_id) {
+        second.push(Span::styled(
+            " \u{2301} away",
+            Style::default().fg(quiet_or(th.warn)),
+        ));
     }
     // The directory, when it is not the one the branch name implies — a
     // checkout cut for one ticket and later moved onto another branch.

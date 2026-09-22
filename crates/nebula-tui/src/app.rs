@@ -4544,6 +4544,30 @@ impl App {
         Some(dir)
     }
 
+    /// Whether a checkout sits outside the folder its project lives in —
+    /// a temp directory, a scratchpad, somewhere an agent or an old
+    /// session left it. Checkouts in the usual places all answer false:
+    /// the repo itself, a sibling cut beside it, and the
+    /// `<repo>-worktrees/` directory are every one of them under the
+    /// project's own folder.
+    ///
+    /// It is worth saying out loud because such a checkout is real work on
+    /// a real branch that no `ls` of the work folder will ever show, and
+    /// the machine may delete it: a worktree under `/tmp` is one reboot
+    /// from being gone with whatever was not pushed.
+    pub fn worktree_is_away(&self, id: &WorktreeId) -> bool {
+        let Some(wt) = self.tree.worktrees.iter().find(|w| &w.id == id) else {
+            return false;
+        };
+        if wt.is_main {
+            return false;
+        }
+        let Some(project) = self.tree.projects.iter().find(|p| p.id == wt.project_id) else {
+            return false;
+        };
+        !wt.path.starts_with(self.project_folder(project))
+    }
+
     /// Whether a checkout is currently mixing its project's isolated
     /// paths with other work. False until the guard has read it, and for
     /// every project that never named any.
@@ -6214,5 +6238,53 @@ mod tests {
         assert_eq!(label("w4"), None, "slashes cannot be a directory");
         assert_eq!(label("w5"), None, "the root says nothing");
         assert_eq!(label("gone"), None, "a checkout not in the tree");
+    }
+
+    /// "Away" is about the folder, not the layout: every checkout the work
+    /// folder holds is at home, whichever naming scheme cut it, and only
+    /// one somewhere else entirely — a temp dir a session left behind — is
+    /// called out. Those are the ones no `ls` of the work folder shows and
+    /// the machine may delete.
+    #[test]
+    fn only_a_checkout_outside_the_work_folder_is_away() {
+        use nebula_core::entities::{Project, Worktree};
+        use nebula_core::ids::{ProjectId, WorktreeId};
+        let mut app = App::new();
+        app.tree.projects = vec![Project {
+            id: ProjectId("p1".into()),
+            name: "backend".into(),
+            repo_path: "/w/Digitalzone/backend".into(),
+            sort_order: 0,
+        }];
+        let wt = |id: &str, path: &str, is_main: bool| Worktree {
+            id: WorktreeId(id.into()),
+            project_id: ProjectId("p1".into()),
+            path: path.into(),
+            branch: "b".into(),
+            is_main,
+            sort_order: 0,
+        };
+        app.tree.worktrees = vec![
+            wt("root", "/w/Digitalzone/backend", true),
+            // The flat layout, beside the repo.
+            wt("flat", "/w/Digitalzone/backend-dzt-1", false),
+            // The default layout's own directory.
+            wt("std", "/w/Digitalzone/backend-worktrees/dzt-2", false),
+            // Claude Code's own, inside the repo.
+            wt(
+                "claude",
+                "/w/Digitalzone/backend/.claude/worktrees/dzt-3",
+                false,
+            ),
+            // A scratchpad from an old session: gone on reboot.
+            wt("tmp", "/private/tmp/xyz/scratchpad/wt-bnpl", false),
+        ];
+        let away = |id: &str| app.worktree_is_away(&WorktreeId(id.into()));
+        assert!(!away("root"), "the repo itself");
+        assert!(!away("flat"), "beside the repo");
+        assert!(!away("std"), "the default layout");
+        assert!(!away("claude"), "inside the repo is still in the folder");
+        assert!(away("tmp"), "a temp directory is not the work folder");
+        assert!(!away("gone"), "a checkout not in the tree");
     }
 }
