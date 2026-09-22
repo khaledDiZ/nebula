@@ -101,6 +101,27 @@ pub const DEFAULT_SESSION_IDLE_TIMEOUT: &str = "5m";
 
 impl Config {
     pub fn load() -> Self {
+        // Tests never read the machine's real settings. The daemon calls
+        // this from production paths the suite exercises — where a worktree
+        // is placed and what it is cut from, whether a new project is `git
+        // init`ed, whether agents prewarm — so a developer who set any of
+        // those in their own config.json would watch unrelated tests fail
+        // with paths and branches from their desk. Anything a test needs to
+        // vary is passed in instead (`reap_prewarmed_with`,
+        // `start_run_with`, the `template`/`configured` arguments in
+        // `git.rs`), which is the shape the rest of this crate already
+        // follows.
+        #[cfg(test)]
+        return Self::default();
+        #[cfg(not(test))]
+        {
+            Self::load_from_files()
+        }
+    }
+
+    /// [`Config::load`]'s real body, split out so the test build can bypass
+    /// it without duplicating the layering rules.
+    fn load_from_files() -> Self {
         let loaded = nebula_core::settings::load::<Self>(
             &nebula_core::paths::config_path(),
             &nebula_core::paths::config_local_path(),

@@ -165,17 +165,14 @@ fn detached_label(head: Option<&str>) -> String {
 /// `worktree_path_template` SETTING means.
 pub const DEFAULT_WORKTREE_PATH_TEMPLATE: &str = "../{repo}-worktrees/{branch}";
 
-/// Directory a new worktree for `branch` should live in — by default
-/// `<repo>/../<repo-name>-worktrees/<branch>` (slashes in branch → dashes),
-/// or wherever the `worktree_path_template` SETTING puts it. The config is
-/// read here, fresh at each use like every other daemon setting, so an edit
-/// reaches the next worktree without a restart.
+/// Directory a new worktree for `branch` lives in under the default
+/// layout: `<repo>/../<repo-name>-worktrees/<branch>` (slashes in branch →
+/// dashes). The `worktree_path_template` SETTING replaces it, and like
+/// every other setting this module uses, the caller resolves it and passes
+/// it to [`worktree_dir_with`] — nothing in `git.rs` reads config, so its
+/// answers depend only on its arguments and the repo on disk.
 pub fn worktree_dir(repo: &Path, branch: &str) -> PathBuf {
-    worktree_dir_with(
-        repo,
-        branch,
-        crate::config::Config::load().worktree_path_template(),
-    )
+    worktree_dir_with(repo, branch, None)
 }
 
 /// `worktree_dir` with the template handed in instead of loaded, so the
@@ -258,8 +255,13 @@ fn fold(p: &Path) -> PathBuf {
 /// existing branch when `-b` fails because it already exists. `None` is
 /// git's own default — the checkout's HEAD; a base that is a
 /// remote-tracking branch becomes the new branch's upstream, as git does.
-pub async fn add_worktree(repo: &Path, branch: &str, base: Option<&str>) -> Result<PathBuf> {
-    add_worktree_inner(repo, branch, base, true).await
+pub async fn add_worktree(
+    repo: &Path,
+    branch: &str,
+    base: Option<&str>,
+    template: Option<&str>,
+) -> Result<PathBuf> {
+    add_worktree_inner(repo, branch, base, true, template).await
 }
 
 /// `add_worktree` for a branch nobody named a base for: it starts at the
@@ -270,9 +272,13 @@ pub async fn add_worktree(repo: &Path, branch: &str, base: Option<&str>) -> Resu
 /// aims its first `git push` at main (`push.default=simple` refuses it,
 /// `upstream` sends it). Falls back to HEAD when there is no `origin` or
 /// the fetch fails (offline).
-pub async fn add_worktree_off_default(repo: &Path, branch: &str) -> Result<PathBuf> {
+pub async fn add_worktree_off_default(
+    repo: &Path,
+    branch: &str,
+    template: Option<&str>,
+) -> Result<PathBuf> {
     let base = default_base(repo).await;
-    add_worktree_inner(repo, branch, base.as_deref(), false).await
+    add_worktree_inner(repo, branch, base.as_deref(), false, template).await
 }
 
 /// `add_worktree` for a base the caller named (`nebula worktree --base
@@ -286,11 +292,16 @@ pub async fn add_worktree_off_default(repo: &Path, branch: &str) -> Result<PathB
 /// decides. The rewrite does not wait on the fetch succeeding: offline,
 /// `origin/main` as last fetched is still never behind the local branch's
 /// last pull, and the daemon log says the fetch failed.
-pub async fn add_worktree_off_ref(repo: &Path, branch: &str, base: &str) -> Result<PathBuf> {
+pub async fn add_worktree_off_ref(
+    repo: &Path,
+    branch: &str,
+    base: &str,
+    template: Option<&str>,
+) -> Result<PathBuf> {
     fetch_origin_if_any(repo).await;
     match origin_branch(repo, base).await {
-        Some(remote) => add_worktree_inner(repo, branch, Some(&remote), false).await,
-        None => add_worktree_inner(repo, branch, Some(base), true).await,
+        Some(remote) => add_worktree_inner(repo, branch, Some(&remote), false, template).await,
+        None => add_worktree_inner(repo, branch, Some(base), true, template).await,
     }
 }
 
@@ -310,13 +321,14 @@ pub async fn add_worktree_off_configured(
     repo: &Path,
     branch: &str,
     configured: &str,
+    template: Option<&str>,
 ) -> Result<PathBuf> {
     let fetched = fetch_origin_if_any(repo).await;
     if let Some(remote) = origin_branch(repo, configured).await {
-        return add_worktree_inner(repo, branch, Some(&remote), false).await;
+        return add_worktree_inner(repo, branch, Some(&remote), false, template).await;
     }
     if local_branch(repo, configured).await {
-        return add_worktree_inner(repo, branch, Some(configured), true).await;
+        return add_worktree_inner(repo, branch, Some(configured), true, template).await;
     }
     tracing::warn!(
         repo = %repo.display(),
@@ -328,7 +340,7 @@ pub async fn add_worktree_off_configured(
     } else {
         None
     };
-    add_worktree_inner(repo, branch, base.as_deref(), false).await
+    add_worktree_inner(repo, branch, base.as_deref(), false, template).await
 }
 
 async fn add_worktree_inner(
@@ -336,8 +348,9 @@ async fn add_worktree_inner(
     branch: &str,
     base: Option<&str>,
     track: bool,
+    template: Option<&str>,
 ) -> Result<PathBuf> {
-    let path = worktree_dir(repo, branch);
+    let path = worktree_dir_with(repo, branch, template);
     if path.exists() {
         bail!("worktree path already exists: {}", path.display());
     }
@@ -509,7 +522,12 @@ async fn origin_head(repo: &Path) -> Option<String> {
 /// contributor's new commits in, and `gh pr view` there finds the pull
 /// request, which a bare branch name never did for a fork — the
 /// checkout's own PR ROW, its merge and its unread count hang on that.
-pub async fn add_pr_worktree(repo: &Path, number: u64, head: &str) -> Result<PathBuf> {
+pub async fn add_pr_worktree(
+    repo: &Path,
+    number: u64,
+    head: &str,
+    template: Option<&str>,
+) -> Result<PathBuf> {
     let local = git(
         repo,
         &[
@@ -546,7 +564,7 @@ pub async fn add_pr_worktree(repo: &Path, number: u64, head: &str) -> Result<Pat
             ),
         },
     };
-    let path = add_worktree(repo, head, base.as_deref()).await?;
+    let path = add_worktree(repo, head, base.as_deref(), template).await?;
     if from_pr_ref {
         track_pr_ref(repo, head, &pr_ref).await;
     }
@@ -751,7 +769,7 @@ mod tests {
         std::fs::write(repo.join("f"), "base\n").unwrap();
         git(&repo, &["add", "f"]).await.unwrap();
         git(&repo, &["commit", "-m", "base"]).await.unwrap();
-        let wt = add_worktree(&repo, "topic", None).await.unwrap();
+        let wt = add_worktree(&repo, "topic", None, None).await.unwrap();
         // Both sides rewrite the same line, so the rebase has to stop.
         std::fs::write(wt.join("f"), "topic\n").unwrap();
         git(&wt, &["commit", "-am", "topic"]).await.unwrap();
@@ -859,7 +877,7 @@ mod tests {
         init_repo(&repo).await;
         add_bare_origin(&repo, tmp.path()).await;
 
-        let wt = add_pr_worktree(&repo, 7, "feat-x").await.unwrap();
+        let wt = add_pr_worktree(&repo, 7, "feat-x", None).await.unwrap();
         assert_eq!(wt, worktree_dir(&repo, "feat-x"));
         let branch = git(&wt, &["branch", "--show-current"]).await.unwrap();
         assert_eq!(branch.trim(), "feat-x");
@@ -892,7 +910,7 @@ mod tests {
             .await
             .unwrap();
 
-        let wt = add_pr_worktree(&repo, 9, "their-fix").await.unwrap();
+        let wt = add_pr_worktree(&repo, 9, "their-fix", None).await.unwrap();
         let branch = git(&wt, &["branch", "--show-current"]).await.unwrap();
         assert_eq!(branch.trim(), "their-fix");
         let head = git(&wt, &["rev-parse", "HEAD"]).await.unwrap();
@@ -911,7 +929,9 @@ mod tests {
         );
 
         // Neither route: no such PR, no such branch anywhere.
-        let err = add_pr_worktree(&repo, 10, "nowhere").await.unwrap_err();
+        let err = add_pr_worktree(&repo, 10, "nowhere", None)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("#10"), "{err}");
     }
 
@@ -928,7 +948,7 @@ mod tests {
         init_repo(&repo).await;
         let origin = add_bare_origin(&repo, tmp.path()).await;
 
-        let wt = add_pr_worktree(&repo, 7, "feat-x").await.unwrap();
+        let wt = add_pr_worktree(&repo, 7, "feat-x", None).await.unwrap();
         let reviewed = git(&wt, &["rev-parse", "HEAD"]).await.unwrap();
         remove_worktree(&repo, &wt, false).await.unwrap();
         assert!(local_branch(&repo, "feat-x").await, "the delete keeps it");
@@ -950,7 +970,7 @@ mod tests {
             .unwrap();
         assert_ne!(reviewed.trim(), pushed.trim());
 
-        let wt = add_pr_worktree(&repo, 7, "feat-x").await.unwrap();
+        let wt = add_pr_worktree(&repo, 7, "feat-x", None).await.unwrap();
         let head = git(&wt, &["rev-parse", "HEAD"]).await.unwrap();
         assert_eq!(
             head.trim(),
@@ -987,7 +1007,9 @@ mod tests {
             .unwrap();
         assert_ne!(ours.trim(), theirs.trim());
 
-        let wt = add_pr_worktree(&repo, 129, "someone/main").await.unwrap();
+        let wt = add_pr_worktree(&repo, 129, "someone/main", None)
+            .await
+            .unwrap();
         assert_eq!(wt, worktree_dir(&repo, "someone/main"));
         assert!(wt.ends_with("someone-main"), "{}", wt.display());
         let branch = git(&wt, &["branch", "--show-current"]).await.unwrap();
@@ -1029,7 +1051,7 @@ mod tests {
         std::fs::create_dir(&repo).unwrap();
         init_repo(&repo).await;
         assert_eq!(default_base(&repo).await, None);
-        let wt = add_worktree_off_default(&repo, "feat").await.unwrap();
+        let wt = add_worktree_off_default(&repo, "feat", None).await.unwrap();
         let head = git(&wt, &["rev-parse", "HEAD"]).await.unwrap();
         let root = git(&repo, &["rev-parse", "HEAD"]).await.unwrap();
         assert_eq!(head, root);
@@ -1048,7 +1070,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(default_base(&repo).await, None);
-        let wt = add_worktree_off_default(&repo, "feat").await.unwrap();
+        let wt = add_worktree_off_default(&repo, "feat", None).await.unwrap();
         let head = git(&wt, &["rev-parse", "HEAD"]).await.unwrap();
         let root = git(&repo, &["rev-parse", "HEAD"]).await.unwrap();
         assert_eq!(head, root);
@@ -1076,7 +1098,7 @@ mod tests {
         );
 
         assert_eq!(default_base(&repo).await.as_deref(), Some("origin/main"));
-        let wt = add_worktree_off_default(&repo, "feat").await.unwrap();
+        let wt = add_worktree_off_default(&repo, "feat", None).await.unwrap();
         let head = git(&wt, &["rev-parse", "HEAD"]).await.unwrap();
         assert_eq!(head, landed, "starts at origin's main, not the checkout's");
         assert!(
@@ -1101,7 +1123,9 @@ mod tests {
         let local_main = git(&repo, &["rev-parse", "main"]).await.unwrap();
         assert_ne!(landed, local_main, "the local main is behind origin's");
 
-        let wt = add_worktree_off_ref(&repo, "feat", "main").await.unwrap();
+        let wt = add_worktree_off_ref(&repo, "feat", "main", None)
+            .await
+            .unwrap();
         let head = git(&wt, &["rev-parse", "HEAD"]).await.unwrap();
         assert_eq!(
             head, landed,
@@ -1140,11 +1164,15 @@ mod tests {
         let local_head = git(&repo, &["rev-parse", "HEAD"]).await.unwrap();
         let landed = land_on_origin(tmp.path(), &origin).await;
 
-        let wt = add_worktree_off_ref(&repo, "hotfix", "v1").await.unwrap();
+        let wt = add_worktree_off_ref(&repo, "hotfix", "v1", None)
+            .await
+            .unwrap();
         let head = git(&wt, &["rev-parse", "HEAD"]).await.unwrap();
         assert_eq!(head, tagged, "a tag is used as named");
 
-        let wt = add_worktree_off_ref(&repo, "spike", "HEAD").await.unwrap();
+        let wt = add_worktree_off_ref(&repo, "spike", "HEAD", None)
+            .await
+            .unwrap();
         let head = git(&wt, &["rev-parse", "HEAD"]).await.unwrap();
         assert_eq!(head, local_head, "HEAD is this checkout's, not origin's");
         assert_ne!(head, landed);
@@ -1164,7 +1192,7 @@ mod tests {
         let local_main = git(&repo, &["rev-parse", "main"]).await.unwrap();
         assert_ne!(landed, local_main, "the local main is behind origin's");
 
-        let wt = add_worktree_off_configured(&repo, "feat", "main")
+        let wt = add_worktree_off_configured(&repo, "feat", "main", None)
             .await
             .unwrap();
         let head = git(&wt, &["rev-parse", "HEAD"]).await.unwrap();
@@ -1195,7 +1223,7 @@ mod tests {
         let head_now = git(&repo, &["rev-parse", "HEAD"]).await.unwrap();
         assert_ne!(master, head_now);
 
-        let wt = add_worktree_off_configured(&repo, "feat", "master")
+        let wt = add_worktree_off_configured(&repo, "feat", "master", None)
             .await
             .unwrap();
         let head = git(&wt, &["rev-parse", "HEAD"]).await.unwrap();
@@ -1216,7 +1244,7 @@ mod tests {
         let local = git(&repo, &["rev-parse", "HEAD"]).await.unwrap();
         assert_ne!(landed, local, "the checkout is behind origin");
 
-        let wt = add_worktree_off_configured(&repo, "feat", "master")
+        let wt = add_worktree_off_configured(&repo, "feat", "master", None)
             .await
             .unwrap();
         let head = git(&wt, &["rev-parse", "HEAD"]).await.unwrap();
@@ -1229,7 +1257,7 @@ mod tests {
         );
         // And a tag of that name is not a branch: still the fallback.
         git(&repo, &["tag", "release"]).await.unwrap();
-        let wt = add_worktree_off_configured(&repo, "feat2", "release")
+        let wt = add_worktree_off_configured(&repo, "feat2", "release", None)
             .await
             .unwrap();
         let head = git(&wt, &["rev-parse", "HEAD"]).await.unwrap();
@@ -1242,7 +1270,7 @@ mod tests {
         let repo = tmp.path().join("repo");
         std::fs::create_dir(&repo).unwrap();
         init_repo(&repo).await;
-        let wt = add_worktree(&repo, "feature", None).await.unwrap();
+        let wt = add_worktree(&repo, "feature", None, None).await.unwrap();
 
         // Simulate the user deleting the checkout by hand.
         std::fs::remove_dir_all(&wt).unwrap();
@@ -1259,7 +1287,7 @@ mod tests {
         let repo = tmp.path().join("repo");
         std::fs::create_dir(&repo).unwrap();
         init_repo(&repo).await;
-        let wt = add_worktree(&repo, "feature", None).await.unwrap();
+        let wt = add_worktree(&repo, "feature", None, None).await.unwrap();
         std::fs::remove_dir_all(&wt).unwrap();
         git(&repo, &["worktree", "prune"]).await.unwrap();
 
@@ -1273,7 +1301,7 @@ mod tests {
         let repo = tmp.path().join("repo");
         std::fs::create_dir(&repo).unwrap();
         init_repo(&repo).await;
-        let wt = add_worktree(&repo, "feature", None).await.unwrap();
+        let wt = add_worktree(&repo, "feature", None, None).await.unwrap();
         let wt_str = wt.to_string_lossy().into_owned();
         git(
             &repo,
@@ -1299,7 +1327,7 @@ mod tests {
         let repo = tmp.path().join("repo");
         std::fs::create_dir(&repo).unwrap();
         init_repo(&repo).await;
-        let wt = add_worktree(&repo, "feature", None).await.unwrap();
+        let wt = add_worktree(&repo, "feature", None, None).await.unwrap();
         std::fs::write(wt.join("untracked.txt"), "dirty").unwrap();
 
         assert!(remove_worktree(&repo, &wt, false).await.is_err());

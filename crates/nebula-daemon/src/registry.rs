@@ -729,13 +729,27 @@ impl Daemon {
         // auto-created one — starts at the `worktree_base_branch` SETTING
         // when one is set (`master`, resolved the same way), else at the
         // fetched `origin/HEAD`; never at this checkout's HEAD.
+        // One config read for both settings this decision needs: where the
+        // checkout goes (`worktree_path_template`) and what it starts from.
+        // `git.rs` reads no settings of its own, so both travel as
+        // arguments.
+        let cfg = crate::config::Config::load();
+        let template = cfg.worktree_path_template();
         let path = match base {
-            Some(base) => git::add_worktree_off_ref(&project.repo_path, branch, base).await?,
-            None => match crate::config::Config::load().worktree_base_branch() {
+            Some(base) => {
+                git::add_worktree_off_ref(&project.repo_path, branch, base, template).await?
+            }
+            None => match cfg.worktree_base_branch() {
                 Some(configured) => {
-                    git::add_worktree_off_configured(&project.repo_path, branch, configured).await?
+                    git::add_worktree_off_configured(
+                        &project.repo_path,
+                        branch,
+                        configured,
+                        template,
+                    )
+                    .await?
                 }
-                None => git::add_worktree_off_default(&project.repo_path, branch).await?,
+                None => git::add_worktree_off_default(&project.repo_path, branch, template).await?,
             },
         };
         let worktree = self.register_worktree(project_id, path, branch)?;
@@ -779,7 +793,15 @@ impl Daemon {
         {
             return Ok(existing);
         }
-        let path = git::add_pr_worktree(&project.repo_path, number, head).await?;
+        // A PR's checkout is placed by the same template as any other.
+        let cfg = crate::config::Config::load();
+        let path = git::add_pr_worktree(
+            &project.repo_path,
+            number,
+            head,
+            cfg.worktree_path_template(),
+        )
+        .await?;
         let worktree = self.register_worktree(project_id, path, head)?;
         self.run_worktree_hook(WorktreeHook::Create, &project.repo_path, &worktree)
             .await;
