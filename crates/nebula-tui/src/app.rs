@@ -4563,12 +4563,41 @@ impl App {
         // `feat/x` is checked out in `feat-x`: the same name, spelled the
         // only way a directory can spell it.
         let branch = wt.branch.replace('/', "-");
-        // The usual layout names the directory for the branch, or for the
-        // repo and the branch together — neither disagrees with the row.
+        // The usual layouts all agree with the row and say nothing: the
+        // directory named for the branch, for the repo and branch
+        // together, or — the `{ticket}` worktree template — for the repo
+        // and the branch's leading issue id. That last one matters: a repo
+        // whose checkouts are all `<repo>-<ticket>` would otherwise label
+        // every single row, and a mark on everything marks nothing.
         if dir == branch || dir.ends_with(&format!("-{branch}")) {
             return None;
         }
+        let ticket = Self::ticket_of(&branch);
+        if ticket != branch && (dir == ticket || dir.ends_with(&format!("-{ticket}"))) {
+            return None;
+        }
         Some(dir)
+    }
+
+    /// The leading issue id in a branch — `dzt-3448` out of
+    /// `dzt-3448-pos-beacon` — matching the daemon's `{ticket}` worktree
+    /// template so a directory that template produced reads as expected
+    /// here. A branch without the `<letters>-<digits>` shape has no ticket,
+    /// and answers with itself.
+    fn ticket_of(safe_branch: &str) -> &str {
+        let mut parts = safe_branch.splitn(3, '-');
+        let (Some(head), Some(num)) = (parts.next(), parts.next()) else {
+            return safe_branch;
+        };
+        let is_id = !head.is_empty()
+            && head.chars().all(|c| c.is_ascii_alphabetic())
+            && !num.is_empty()
+            && num.chars().all(|c| c.is_ascii_digit());
+        if is_id {
+            &safe_branch[..head.len() + 1 + num.len()]
+        } else {
+            safe_branch
+        }
     }
 
     /// Whether a checkout sits outside the folder its project lives in —
@@ -6253,6 +6282,18 @@ mod tests {
             // The usual layouts, which say nothing.
             wt("w2", "/w/dz-frontend-worktrees/dzt-3534", "dzt-3534", false),
             wt("w3", "/w/dz-frontend-dzt-3535", "dzt-3535", false),
+            // The `{ticket}` template's own output: repo plus the branch's
+            // leading issue id. Every checkout of such a repo looks like
+            // this, so labelling them all would label nothing.
+            wt(
+                "w6",
+                "/w/dz-frontend-dzt-3448",
+                "dzt-3448-pos-beacon-boot-profile",
+                false,
+            ),
+            // A directory that is neither the branch nor its ticket: a
+            // scratchpad an old session cut, which is worth saying.
+            wt("w7", "/tmp/x/wt-bnpl", "dzt-3554-read-ops-bounds", false),
             // A slashed branch spelled the only way a directory can.
             wt("w4", "/w/someone-main", "someone/main", false),
             // The root is marked by its own glyph; its folder is the repo.
@@ -6264,6 +6305,12 @@ mod tests {
         assert_eq!(label("w3"), None, "repo and branch together");
         assert_eq!(label("w4"), None, "slashes cannot be a directory");
         assert_eq!(label("w5"), None, "the root says nothing");
+        assert_eq!(label("w6"), None, "repo plus the branch's ticket");
+        assert_eq!(
+            label("w7").as_deref(),
+            Some("wt-bnpl"),
+            "neither branch nor ticket"
+        );
         assert_eq!(label("gone"), None, "a checkout not in the tree");
     }
 
