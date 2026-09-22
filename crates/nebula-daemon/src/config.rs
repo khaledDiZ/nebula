@@ -40,6 +40,16 @@ pub struct Config {
     /// with no such branch at all — the default again, with a warning in
     /// the daemon log. Read through [`Config::worktree_base_branch`].
     pub worktree_base_branch: String,
+    /// Where a new WORKTREE's directory is placed, as a path template
+    /// resolved against the repo directory. Empty (the default) means
+    /// `../{repo}-worktrees/{branch}`, the layout nebula has always used.
+    /// Placeholders: `{repo}` the repo directory's name, `{branch}` the
+    /// branch with `/` turned to `-`, and `{ticket}` the branch's leading
+    /// issue id (`dzt-3448` out of `dzt-3448-pos-beacon-boot-profile`),
+    /// which is the whole branch when it carries no such prefix. A repo
+    /// whose team names checkouts `<repo>-<ticket>` beside the repo sets
+    /// `../{repo}-{ticket}`. Read through [`Config::worktree_path_template`].
+    pub worktree_path_template: String,
     /// User-defined harnesses from the `custom_harnesses` key, shared with
     /// the TUI's picker. The daemon resolves programs, model flags and
     /// respawns from this list; entries that fail validation are refused
@@ -78,6 +88,7 @@ impl Default for Config {
             prewarm_sessions: true,
             session_idle_timeout: DEFAULT_SESSION_IDLE_TIMEOUT.into(),
             worktree_base_branch: String::new(),
+            worktree_path_template: String::new(),
             custom_harnesses: Vec::new(),
             harnesses: BTreeMap::new(),
             projects: BTreeMap::new(),
@@ -119,6 +130,15 @@ impl Config {
         let name = self.worktree_base_branch.trim();
         let name = name.strip_prefix("origin/").unwrap_or(name).trim();
         (!name.is_empty()).then_some(name)
+    }
+
+    /// The configured WORKTREE PATH TEMPLATE, or None for the default
+    /// layout (`../{repo}-worktrees/{branch}`). Trimmed; an empty or
+    /// whitespace-only value means the default, so clearing the row in
+    /// config.json restores it.
+    pub fn worktree_path_template(&self) -> Option<&str> {
+        let t = self.worktree_path_template.trim();
+        (!t.is_empty()).then_some(t)
     }
 
     /// The RUN COMMAND set for the project checked out at `repo_path` in

@@ -371,6 +371,7 @@ pub enum SettingKind {
     PaletteEnterAttaches,
     GitInitOnCreate,
     WorktreeBaseBranch,
+    WorktreePathTemplate,
     Editor,
     CloseFinderOnOpen,
     SshSyncConfig,
@@ -434,7 +435,10 @@ impl SettingKind {
     pub fn is_text(self) -> bool {
         matches!(
             self,
-            SettingKind::WorktreeBaseBranch | SettingKind::RunCommand | SettingKind::OpenCommand
+            SettingKind::WorktreeBaseBranch
+                | SettingKind::WorktreePathTemplate
+                | SettingKind::RunCommand
+                | SettingKind::OpenCommand
         )
     }
 
@@ -475,6 +479,12 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
                 kind: SettingKind::WorktreeBaseBranch,
                 label: "Worktree base branch",
                 hint: "Branch new worktrees start from; Enter types one (empty = origin's default)",
+                group: "",
+            },
+            SettingSpec {
+                kind: SettingKind::WorktreePathTemplate,
+                label: "Worktree path",
+                hint: "Where new worktrees are placed: {repo}, {branch}, {ticket} (empty = ../{repo}-worktrees/{branch})",
                 group: "",
             },
             SettingSpec {
@@ -917,6 +927,16 @@ pub struct Config {
     /// resolving (`git::add_worktree_off_configured`); the TUI writes it so
     /// the settings overlay can edit every key in the shared file.
     pub worktree_base_branch: String,
+    /// Where a new WORKTREE's directory is placed, as a path template
+    /// resolved against the repo directory: `{repo}`, `{branch}` and
+    /// `{ticket}` (a branch's leading `dzt-3448`-style issue id, or the
+    /// whole branch when it has none). Empty — the default, shown as
+    /// `auto` — is `../{repo}-worktrees/{branch}`, the layout nebula has
+    /// always used; `../{repo}-{ticket}` is the flat one repos that name
+    /// checkouts after the ticket want. Owned by the daemon, which does
+    /// the resolving (`git::worktree_dir`); the TUI writes it so the
+    /// settings overlay can edit every key in the shared file.
+    pub worktree_path_template: String,
     /// Editor command the file finder (`f`), tree browser (`b`),
     /// find-in-files (`F`), and ⌥click file links launch, invoked as
     /// `<editor> +<line> <file>`. Any command passes through verbatim, so
@@ -1298,6 +1318,7 @@ impl Default for Config {
             palette_enter_attaches: true,
             git_init_on_create: true,
             worktree_base_branch: String::new(),
+            worktree_path_template: String::new(),
             editor: "vim".into(),
             close_finder_on_open: true,
             ssh_sync_config: true,
@@ -2124,6 +2145,10 @@ impl Config {
                 "" => AUTO_CHOICE.into(),
                 name => name.to_string(),
             },
+            SettingKind::WorktreePathTemplate => match self.worktree_path_template.trim() {
+                "" => AUTO_CHOICE.into(),
+                t => t.to_string(),
+            },
             SettingKind::Editor => self.editor.clone(),
             SettingKind::CloseFinderOnOpen => on_off(self.close_finder_on_open).into(),
             SettingKind::SshSyncConfig => on_off(self.ssh_sync_config).into(),
@@ -2195,7 +2220,7 @@ impl Config {
                 self.git_init_on_create = !self.git_init_on_create;
             }
             // Typed, not cycled: see `SettingKind::is_text` / `set_text`.
-            SettingKind::WorktreeBaseBranch => {}
+            SettingKind::WorktreeBaseBranch | SettingKind::WorktreePathTemplate => {}
             SettingKind::Editor => {
                 self.editor = cycle_choice(&self.editor, EDITORS, step).into();
             }
@@ -2306,6 +2331,7 @@ impl Config {
     pub fn text_value(&self, kind: SettingKind) -> String {
         match kind {
             SettingKind::WorktreeBaseBranch => self.worktree_base_branch.clone(),
+            SettingKind::WorktreePathTemplate => self.worktree_path_template.clone(),
             _ => String::new(),
         }
     }
@@ -2317,6 +2343,10 @@ impl Config {
         match kind {
             SettingKind::WorktreeBaseBranch => {
                 self.worktree_base_branch = value.trim().to_string();
+                true
+            }
+            SettingKind::WorktreePathTemplate => {
+                self.worktree_path_template = value.trim().to_string();
                 true
             }
             _ => false,
@@ -2957,6 +2987,60 @@ mod tests {
         assert_eq!(saved["worktree_base_branch"], "");
         assert_eq!(
             load_from(&path).value_label(SettingKind::WorktreeBaseBranch),
+            AUTO_CHOICE
+        );
+    }
+
+    /// The WORKTREE PATH TEMPLATE is a typed row like the base branch, it
+    /// shows `auto` while unset, and — the point of mirroring the daemon's
+    /// key here — it survives a settings save instead of being dropped from
+    /// the shared file by a TUI that doesn't know it.
+    #[test]
+    fn worktree_path_template_is_a_typed_row_that_round_trips() {
+        let mut cfg = Config::default();
+        assert_eq!(cfg.worktree_path_template, "");
+        assert_eq!(
+            cfg.value_label(SettingKind::WorktreePathTemplate),
+            AUTO_CHOICE
+        );
+        assert!(SettingKind::WorktreePathTemplate.is_text());
+        assert!(
+            locate(SettingKind::WorktreePathTemplate).is_some(),
+            "on a tab"
+        );
+
+        // Cycling leaves a typed row alone.
+        let (tab, row) = locate(SettingKind::WorktreePathTemplate).unwrap();
+        cfg.cycle(tab, row, 1);
+        assert_eq!(cfg.worktree_path_template, "");
+
+        assert!(cfg.set_text(SettingKind::WorktreePathTemplate, "  ../{repo}-{ticket} "));
+        assert_eq!(cfg.worktree_path_template, "../{repo}-{ticket}", "trimmed");
+        assert_eq!(
+            cfg.value_label(SettingKind::WorktreePathTemplate),
+            "../{repo}-{ticket}"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        cfg.save_to(&path).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["worktree_path_template"], "../{repo}-{ticket}");
+        assert_eq!(
+            load_from(&path).worktree_path_template,
+            "../{repo}-{ticket}"
+        );
+
+        // A save made from a config that never touched the row must not
+        // drop a template someone set by hand in the file.
+        assert!(cfg.set_text(SettingKind::WorktreePathTemplate, "  "));
+        cfg.save_to(&path).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["worktree_path_template"], "");
+        assert_eq!(
+            load_from(&path).value_label(SettingKind::WorktreePathTemplate),
             AUTO_CHOICE
         );
     }

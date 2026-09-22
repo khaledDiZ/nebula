@@ -161,19 +161,97 @@ fn detached_label(head: Option<&str>) -> String {
     }
 }
 
-/// Directory a new worktree for `branch` should live in:
-/// `<repo>/../<repo-name>-worktrees/<branch>` (slashes in branch → dashes).
+/// The worktree layout nebula has always used, and what an unset
+/// `worktree_path_template` SETTING means.
+pub const DEFAULT_WORKTREE_PATH_TEMPLATE: &str = "../{repo}-worktrees/{branch}";
+
+/// Directory a new worktree for `branch` should live in — by default
+/// `<repo>/../<repo-name>-worktrees/<branch>` (slashes in branch → dashes),
+/// or wherever the `worktree_path_template` SETTING puts it. The config is
+/// read here, fresh at each use like every other daemon setting, so an edit
+/// reaches the next worktree without a restart.
 pub fn worktree_dir(repo: &Path, branch: &str) -> PathBuf {
+    worktree_dir_with(
+        repo,
+        branch,
+        crate::config::Config::load().worktree_path_template(),
+    )
+}
+
+/// `worktree_dir` with the template handed in instead of loaded, so the
+/// layout can be pinned in tests and the config read stays at one site.
+/// `None` is [`DEFAULT_WORKTREE_PATH_TEMPLATE`]. The rendered template is
+/// resolved against the repo directory unless it is already absolute, and
+/// `.`/`..` segments are folded lexically — the path names a checkout that
+/// does not exist yet, so the filesystem cannot do it for us, and an
+/// unfolded `repo/../repo-worktrees/x` would be what every panel, error and
+/// `git worktree list` then shows.
+pub fn worktree_dir_with(repo: &Path, branch: &str, template: Option<&str>) -> PathBuf {
     let repo_name = repo
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "repo".into());
     let safe_branch = branch.replace('/', "-");
-    repo.parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(format!("{repo_name}-worktrees"))
-        .join(safe_branch)
+    let rendered = template
+        .unwrap_or(DEFAULT_WORKTREE_PATH_TEMPLATE)
+        .replace("{repo}", &repo_name)
+        .replace("{branch}", &safe_branch)
+        .replace("{ticket}", ticket_id(&safe_branch));
+    let rendered = PathBuf::from(rendered);
+    let joined = if rendered.is_absolute() {
+        rendered
+    } else {
+        repo.to_path_buf().join(rendered)
+    };
+    let folded = fold(&joined);
+    // A template that renders to nothing (or to the repo itself) would hand
+    // `git worktree add` the repo path and fail confusingly. Fall back to
+    // the default layout instead, which is always a path of its own.
+    if folded.as_os_str().is_empty() || folded == repo {
+        return worktree_dir_with(repo, branch, Some(DEFAULT_WORKTREE_PATH_TEMPLATE));
+    }
+    folded
+}
+
+/// The leading issue id in a branch name — `dzt-3448` out of
+/// `dzt-3448-pos-beacon-boot-profile` — for the `{ticket}` placeholder.
+/// The shape is `<letters>-<digits>`; a branch without it (`fe-pos-caching`,
+/// `someone-main`) has no ticket to name, so the whole branch stands in and
+/// the checkout keeps a unique directory either way.
+fn ticket_id(safe_branch: &str) -> &str {
+    let mut parts = safe_branch.splitn(3, '-');
+    let (Some(head), Some(num)) = (parts.next(), parts.next()) else {
+        return safe_branch;
+    };
+    let is_id = !head.is_empty()
+        && head.chars().all(|c| c.is_ascii_alphabetic())
+        && !num.is_empty()
+        && num.chars().all(|c| c.is_ascii_digit());
+    if is_id {
+        &safe_branch[..head.len() + 1 + num.len()]
+    } else {
+        safe_branch
+    }
+}
+
+/// Fold `.` and `..` out of a path lexically, without touching the disk.
+fn fold(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // Keep a leading `..` that has nothing to pop: a relative
+                // template can legitimately climb above its own start.
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 /// `git worktree add <path> -b <branch> [base]`. Falls back to checking out an
@@ -1226,5 +1304,105 @@ mod tests {
 
         assert!(remove_worktree(&repo, &wt, false).await.is_err());
         remove_worktree(&repo, &wt, true).await.unwrap();
+    }
+
+    /// The default template is the layout nebula shipped before the setting
+    /// existed, so an untouched install sees no change.
+    #[test]
+    fn default_template_is_the_sibling_worktrees_dir() {
+        let repo = Path::new("/w/digital-zone-frontend");
+        assert_eq!(
+            worktree_dir_with(repo, "dzt-3448-pos-beacon", None),
+            Path::new("/w/digital-zone-frontend-worktrees/dzt-3448-pos-beacon")
+        );
+    }
+
+    /// A branch with slashes keeps them out of the directory name, under
+    /// any template — git would read them as nested directories.
+    #[test]
+    fn slashes_in_the_branch_become_dashes() {
+        let repo = Path::new("/w/repo");
+        assert_eq!(
+            worktree_dir_with(repo, "someone/main", None),
+            Path::new("/w/repo-worktrees/someone-main")
+        );
+        assert_eq!(
+            worktree_dir_with(repo, "someone/main", Some("../{repo}-{branch}")),
+            Path::new("/w/repo-someone-main")
+        );
+    }
+
+    /// The flat `<repo>-<ticket>` layout: the checkout is named for the
+    /// ticket, not the whole branch, and sits beside the repo.
+    #[test]
+    fn ticket_template_names_the_checkout_after_the_issue() {
+        let repo = Path::new("/w/digital-zone-frontend");
+        let t = Some("../{repo}-{ticket}");
+        assert_eq!(
+            worktree_dir_with(repo, "dzt-3448-pos-beacon-boot-profile", t),
+            Path::new("/w/digital-zone-frontend-dzt-3448")
+        );
+        assert_eq!(
+            worktree_dir_with(repo, "xsqd-90-schema-recipient-on-orders", t),
+            Path::new("/w/digital-zone-frontend-xsqd-90")
+        );
+    }
+
+    /// A branch with no `<letters>-<digits>` prefix has no ticket to name,
+    /// so the whole branch stands in: two such worktrees still get two
+    /// directories instead of colliding on one.
+    #[test]
+    fn ticket_falls_back_to_the_whole_branch() {
+        assert_eq!(ticket_id("dzt-3448-pos-beacon"), "dzt-3448");
+        assert_eq!(ticket_id("dzt-3448"), "dzt-3448");
+        assert_eq!(
+            ticket_id("fe-pos-for-you-query-caching"),
+            "fe-pos-for-you-query-caching"
+        );
+        assert_eq!(ticket_id("someone-main"), "someone-main");
+        assert_eq!(ticket_id("main"), "main");
+        assert_eq!(ticket_id(""), "");
+        // Digits first is not an id: the shape is letters then number.
+        assert_eq!(ticket_id("3448-dzt-thing"), "3448-dzt-thing");
+    }
+
+    /// A subdirectory template stays inside the repo, and `..` is folded so
+    /// the path shown is the tidy one.
+    #[test]
+    fn templates_resolve_against_the_repo_and_fold() {
+        let repo = Path::new("/w/repo");
+        assert_eq!(
+            worktree_dir_with(repo, "feat-x", Some(".worktrees/{branch}")),
+            Path::new("/w/repo/.worktrees/feat-x")
+        );
+        assert_eq!(
+            worktree_dir_with(repo, "feat-x", Some("../../trees/{repo}/{branch}")),
+            Path::new("/trees/repo/feat-x")
+        );
+    }
+
+    /// An absolute template is taken as written, so worktrees can live on
+    /// another disk entirely.
+    #[test]
+    fn absolute_templates_are_used_as_given() {
+        assert_eq!(
+            worktree_dir_with(
+                Path::new("/w/repo"),
+                "feat-x",
+                Some("/scratch/{repo}/{branch}")
+            ),
+            Path::new("/scratch/repo/feat-x")
+        );
+    }
+
+    /// A template that renders to the repo itself would hand `git worktree
+    /// add` the repo path; the default layout stands in rather than failing.
+    #[test]
+    fn a_template_that_collapses_onto_the_repo_falls_back() {
+        let repo = Path::new("/w/repo");
+        assert_eq!(
+            worktree_dir_with(repo, "feat-x", Some(".")),
+            Path::new("/w/repo-worktrees/feat-x")
+        );
     }
 }

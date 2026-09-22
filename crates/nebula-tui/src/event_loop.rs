@@ -3388,6 +3388,9 @@ pub(crate) fn open_prompt(app: &mut App, kind: PromptKind) {
                 crate::config::SettingKind::WorktreeBaseBranch => {
                     "branch new worktrees start from (empty = auto: origin's default branch)"
                 }
+                crate::config::SettingKind::WorktreePathTemplate => {
+                    "where new worktrees are placed: {repo}, {branch}, {ticket} (empty = auto: ../{repo}-worktrees/{branch})"
+                }
                 crate::config::SettingKind::RunCommand => {
                     "shell line r runs in this project's worktrees (empty = the checkout's .nebula.json \"run\")"
                 }
