@@ -3106,6 +3106,8 @@ fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
         // full-screen over it, where the header is not on screen.
         Action::NextProjectTab
         | Action::PrevProjectTab
+        | Action::NextFolder
+        | Action::PrevFolder
         | Action::CloseProjectTab
         | Action::SelectProjectTab(_)
         | Action::ProjectDropdown => app.flash = Some(launcher::NO_TABS_HERE.into()),
@@ -3595,6 +3597,43 @@ fn open_folder(app: &mut App, path: std::path::PathBuf, out: &mut Vec<ClientRequ
         app.flash = Some(format!("{name} is already a project — opened it"));
         return;
     }
+    // A folder that is not itself a checkout but holds them — the
+    // directory a team keeps its repos side by side in — adds every repo
+    // under it in one go, rather than refusing with "not a git
+    // repository" and leaving the user to add four paths by hand. They
+    // land as ordinary projects; being siblings on disk is what puts them
+    // on one tab strip (`App::project_folder`), so nothing groups them
+    // but where they already live.
+    if !is_checkout(&canon) {
+        let repos = repos_in_folder(&canon);
+        if !repos.is_empty() {
+            let found = repos.len();
+            for (i, repo) in repos.into_iter().enumerate() {
+                // Only the first moves the screen: the rest arrive behind
+                // it rather than each yanking the grid onto itself.
+                let intent = if i == 0 {
+                    PendingIntent::SelectCreatedProject
+                } else {
+                    PendingIntent::None
+                };
+                send_with(app, out, intent, move |req_id| ClientRequest::AddProject {
+                    req_id,
+                    path: repo,
+                    name: None,
+                    create_missing: false,
+                });
+            }
+            let name = canon
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| canon.to_string_lossy().into_owned());
+            app.flash = Some(format!(
+                "{name}: opening {found} {}",
+                if found == 1 { "repo" } else { "repos" }
+            ));
+            return;
+        }
+    }
     send_with(app, out, PendingIntent::SelectCreatedProject, |req_id| {
         ClientRequest::AddProject {
             req_id,
@@ -3603,6 +3642,31 @@ fn open_folder(app: &mut App, path: std::path::PathBuf, out: &mut Vec<ClientRequ
             create_missing: false,
         }
     });
+}
+
+/// Whether `dir` is a repo's own checkout: `.git` as a directory. A linked
+/// worktree has `.git` as a *file* pointing into the repo, and is
+/// deliberately not one — a folder of repos holds the checkouts beside
+/// each other, and adding a worktree would register the repo it belongs to
+/// a second time under the branch directory's name.
+fn is_checkout(dir: &std::path::Path) -> bool {
+    dir.join(".git").is_dir()
+}
+
+/// The repos sitting directly in `dir`, in name order. One level only:
+/// a folder of repos is a flat list of them, and walking deeper would
+/// sweep up vendored checkouts and `node_modules` clones nobody asked for.
+fn repos_in_folder(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut repos: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| is_checkout(p))
+        .collect();
+    repos.sort();
+    repos
 }
 
 /// Open the selected repo's page on its git host (`G`). Any worktree
@@ -11837,6 +11901,74 @@ mod tests {
         assert_eq!(
             app.selected_project().map(|p| p.name.as_str()),
             Some("demo")
+        );
+    }
+
+    /// A folder holding repos side by side opens all of them at once,
+    /// which is what "add my work folder" has always meant and what a
+    /// single AddProject could only answer with "not a git repository".
+    /// Linked worktrees in the same folder are left out: their `.git` is a
+    /// file, and adding one would register its repo again under the branch
+    /// directory's name.
+    #[test]
+    fn a_folder_of_repos_opens_every_repo_in_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let folder = root.join("Digitalzone");
+        for repo in ["backend", "frontend", "dashboards"] {
+            std::fs::create_dir_all(folder.join(repo).join(".git")).unwrap();
+        }
+        // A linked worktree beside them: `.git` is a file, not a directory.
+        std::fs::create_dir_all(folder.join("frontend-dzt-1")).unwrap();
+        std::fs::write(
+            folder.join("frontend-dzt-1").join(".git"),
+            "gitdir: ../frontend/.git/worktrees/dzt-1",
+        )
+        .unwrap();
+        // And a plain directory of notes, which is no repo at all.
+        std::fs::create_dir_all(folder.join("notes")).unwrap();
+
+        let mut app = App::new();
+        let mut out = Vec::new();
+        open_folder(&mut app, folder.clone(), &mut out);
+
+        let added: Vec<&std::path::PathBuf> = out
+            .iter()
+            .filter_map(|r| match r {
+                ClientRequest::AddProject { path, .. } => Some(path),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            added,
+            [
+                &folder.join("backend"),
+                &folder.join("dashboards"),
+                &folder.join("frontend"),
+            ],
+            "every checkout, in name order, and nothing else"
+        );
+        assert_eq!(app.flash.as_deref(), Some("Digitalzone: opening 3 repos"));
+    }
+
+    /// A folder with no repos under it is still passed through as one
+    /// path, so the daemon's own "not a git repository" is what the user
+    /// sees — the bulk path must not swallow the ordinary error.
+    #[test]
+    fn a_folder_with_no_repos_is_still_one_add() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let folder = root.join("empty");
+        std::fs::create_dir_all(folder.join("notes")).unwrap();
+        let mut app = App::new();
+        let mut out = Vec::new();
+        open_folder(&mut app, folder.clone(), &mut out);
+        assert!(
+            matches!(
+                out.as_slice(),
+                [ClientRequest::AddProject { path, .. }] if path == &folder
+            ),
+            "{out:?}"
         );
     }
 

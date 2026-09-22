@@ -412,6 +412,10 @@ pub(super) fn handle_action(
         // The PROJECT TABS across the header.
         Action::NextProjectTab => step_tab(app, 1, out),
         Action::PrevProjectTab => step_tab(app, -1, out),
+        // `}` / `{`: past the ends of the strip, to the next folder of
+        // repos on disk.
+        Action::NextFolder => step_folder(app, 1, out),
+        Action::PrevFolder => step_folder(app, -1, out),
         Action::CloseProjectTab => close_active_tab(app, out),
         Action::SelectProjectTab(n) => open_tab_slot(app, n, out),
         // `⌘P`: the list the header's `+` drops, the click's own
@@ -598,6 +602,7 @@ pub(super) const NO_TABS_HERE: &str = "project tabs are on the grid's header —
 /// What the tab keys say with nothing to move between.
 const NO_TABS: &str = "no projects open — + in the header opens one";
 const ONE_TAB: &str = "one project open — + in the header opens another";
+const ONE_FOLDER: &str = "every project is in one folder — { and } move between folders of repos";
 /// The PROJECT DROPDOWN's last row: a folder that is not a project yet.
 const OPEN_FOLDER: &str = "+ open a folder…";
 /// What closing the only tab says: it is the project on screen, and there
@@ -667,6 +672,21 @@ pub(super) fn step_tab(app: &mut App, delta: i64, out: &mut Vec<ClientRequest>) 
         return;
     }
     open_tab(app, &tabs[next], out);
+}
+
+/// `}` / `{`: swing the whole strip onto another FOLDER — the next set of
+/// repos that live beside each other on disk — landing on its first
+/// project, which opens a tab for it as any other way in does. Wraps, so
+/// two folders are one key apart in either direction. A machine whose
+/// projects all share one folder has nowhere to go, and says so rather
+/// than doing nothing silently.
+pub(super) fn step_folder(app: &mut App, delta: i32, out: &mut Vec<ClientRequest>) {
+    app.settle_project_tabs();
+    let Some(next) = app.project_in_folder_step(delta) else {
+        app.flash = Some(ONE_FOLDER.into());
+        return;
+    };
+    open_tab(app, &next, out);
 }
 
 /// `k`,`k` on the top row of cards: the keys go up to the PROJECT TABS,

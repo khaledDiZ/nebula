@@ -36,6 +36,11 @@ const CRUMB: &str = "sessions";
 /// Longest a project's name is drawn on its PROJECT TAB before it is
 /// clipped, so one long name cannot push every other tab off the row.
 const PROJECT_TAB_MAX: usize = 20;
+/// How much of a FOLDER's name the header chip shows before it is cut.
+const FOLDER_NAME_MAX: usize = 18;
+/// Below this there is no room to name a checkout's directory usefully,
+/// so the card says nothing rather than showing two letters of it.
+const DIR_LABEL_MIN: usize = 6;
 /// A name the row has to cut is never cut under this: at that point the
 /// tab gives way whole, and the count at the edge of the row says so.
 const TAB_NAME_MIN: usize = 3;
@@ -156,7 +161,16 @@ fn head_tabs(app: &mut App, r: Rect, taken: usize) -> Vec<Span<'static>> {
     let hover = app.hover_crumb.clone();
     let sweep = app.animations.then(|| app.sweep_phase());
     let tabs = crate::launcher::project_tabs(app);
-    let room = (r.width as usize).saturating_sub(taken + 2);
+    // The FOLDER the strip is scoped to, named ahead of the tabs. Only
+    // worth a chip when there is more than one folder to be in: with a
+    // single one it would say the same thing on every screen forever.
+    let folder = (app.folders().len() > 1)
+        .then(|| app.current_folder_name())
+        .flatten();
+    let folder_w = folder
+        .as_ref()
+        .map_or(0, |f| f.chars().count().min(FOLDER_NAME_MAX) + 3);
+    let room = (r.width as usize).saturating_sub(taken + 2 + folder_w);
     let add = if tabs.is_empty() { ADD_EMPTY } else { ADD };
     let add_w = add.chars().count() + 2;
     // The `+` is laid out first: it is the only way to a project with no
@@ -219,6 +233,16 @@ fn head_tabs(app: &mut App, r: Rect, taken: usize) -> Vec<Span<'static>> {
     // The `+` leads the row, on the side a project it opens lands on: a
     // button after the last tab would read as appending one there.
     let mut row: Vec<PaneTab> = Vec::new();
+    if let Some(name) = folder {
+        let name = truncate(&name, FOLDER_NAME_MAX);
+        row.push(PaneTab::plain(vec![
+            Span::styled(
+                format!(" {name}"),
+                Style::default().fg(th.muted).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" \u{2502}", Style::default().fg(th.dim)),
+        ]));
+    }
     if add_w <= room {
         let mut style = Style::default().fg(th.muted);
         if hover.as_ref() == Some(&HitTarget::LauncherTabAdd) {
@@ -770,6 +794,7 @@ fn draw_card(
             })
     });
     let branch = truncate(&row.branch, room.saturating_sub(taken));
+    let branch_w = branch.chars().count();
     let mut second = vec![
         Span::styled(glyph, Style::default().fg(scope)),
         Span::styled(branch, Style::default().fg(scope)),
@@ -779,6 +804,18 @@ fn draw_card(
         if let Some((added, removed)) = lines {
             second.push(Span::styled(added, Style::default().fg(quiet_or(th.ok))));
             second.push(Span::styled(removed, Style::default().fg(quiet_or(th.err))));
+        }
+    }
+    // The directory, when it is not the one the branch name implies — a
+    // checkout cut for one ticket and later moved onto another branch.
+    // Dim and in brackets: it is where the row is, not what it is.
+    if let Some(dir) = app.worktree_dir_label(&a.worktree_id) {
+        let spare = room.saturating_sub(taken + branch_w);
+        if spare >= DIR_LABEL_MIN + 3 {
+            second.push(Span::styled(
+                format!(" [{}]", truncate(&dir, spare.saturating_sub(3))),
+                Style::default().fg(quiet_or(th.dim)),
+            ));
         }
     }
     // The SPLIT GUARD's verdict rides at the end of the same line, in the

@@ -70,6 +70,12 @@ pub enum Action {
     NextProjectTab,
     /// `[`: the tab to the left. The first tab goes no further.
     PrevProjectTab,
+    /// `}`: the next FOLDER — the repos beside this one on disk give way
+    /// to the next folder's, and the grid lands on its first project.
+    /// Wraps, and does nothing at all while every project shares a folder.
+    NextFolder,
+    /// `{`: the folder before this one, wrapping the same way.
+    PrevFolder,
     /// `x`: close the PROJECT TAB the grid is on, landing on the tab that
     /// slides into its place.
     CloseProjectTab,
@@ -329,6 +335,24 @@ pub const ACTIONS: &[ActionSpec] = &[
         group: "NAVIGATE",
         scope: Scope::Global,
         defaults: &["["],
+    },
+    ActionSpec {
+        action: Action::NextFolder,
+        id: "next_folder",
+        label: "Next folder",
+        hint: "Launcher view: scope the tab strip to the next folder of repos on disk, landing on its first project",
+        group: "NAVIGATE",
+        scope: Scope::Global,
+        defaults: &["}"],
+    },
+    ActionSpec {
+        action: Action::PrevFolder,
+        id: "prev_folder",
+        label: "Prev folder",
+        hint: "Launcher view: scope the tab strip to the previous folder of repos on disk",
+        group: "NAVIGATE",
+        scope: Scope::Global,
+        defaults: &["{"],
     },
     project_tab_slot!(1, "project_tab_1", "Project tab 1", "cmd+1", "1"),
     project_tab_slot!(2, "project_tab_2", "Project tab 2", "cmd+2", "2"),

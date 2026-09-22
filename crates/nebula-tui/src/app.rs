@@ -3972,6 +3972,70 @@ impl App {
         }
     }
 
+    /// The FOLDER a project belongs to: the directory its checkout sits
+    /// in. Derived, never stored — a folder is only ever "the repos that
+    /// live beside each other on disk", so it cannot drift from the tree
+    /// the way a hand-managed group can, needs no schema and no migration,
+    /// and a repo moved on disk simply belongs to its new folder.
+    pub fn project_folder(&self, project: &Project) -> PathBuf {
+        project
+            .repo_path
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| project.repo_path.clone())
+    }
+
+    /// The folder the header is scoped to: the one holding the project the
+    /// grid is on. None while no project is selected.
+    pub fn current_folder(&self) -> Option<PathBuf> {
+        self.selected_project().map(|p| self.project_folder(p))
+    }
+
+    /// Its last component, for the header — `Digitalzone`, not the whole
+    /// path. Empty for a folder that has no name (the filesystem root).
+    pub fn current_folder_name(&self) -> Option<String> {
+        let folder = self.current_folder()?;
+        Some(
+            folder
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| folder.to_string_lossy().into_owned()),
+        )
+    }
+
+    /// Every folder that has a project in it, in the tree's own order,
+    /// each with the projects under it. The order is stable, so cycling
+    /// folders lands somewhere predictable.
+    pub fn folders(&self) -> Vec<(PathBuf, Vec<ProjectId>)> {
+        let mut out: Vec<(PathBuf, Vec<ProjectId>)> = Vec::new();
+        for p in &self.tree.projects {
+            let folder = self.project_folder(p);
+            match out.iter_mut().find(|(f, _)| f == &folder) {
+                Some((_, ids)) => ids.push(p.id.clone()),
+                None => out.push((folder, vec![p.id.clone()])),
+            }
+        }
+        out
+    }
+
+    /// The first project of the folder `delta` steps from the current one,
+    /// for the folder keys. Wraps, and returns None when there is nothing
+    /// else to go to — one folder, or no projects at all.
+    pub fn project_in_folder_step(&self, delta: i32) -> Option<ProjectId> {
+        let folders = self.folders();
+        if folders.len() < 2 {
+            return None;
+        }
+        let here = self.current_folder()?;
+        let at = folders.iter().position(|(f, _)| f == &here)?;
+        let len = folders.len() as i32;
+        let next = ((at as i32 + delta) % len + len) % len;
+        folders
+            .get(next as usize)
+            .and_then(|(_, ids)| ids.first())
+            .cloned()
+    }
+
     /// Keep the PROJECT TABS true to the tree: a tab whose project is gone
     /// goes, and the project the grid is on gets one at the far left if it
     /// has none — however it got there, whether a tab, the `+` dropdown, a
@@ -4451,6 +4515,33 @@ impl App {
     /// one has been read there, or when git couldn't say.
     pub fn worktree_changes(&self, id: &WorktreeId) -> Option<usize> {
         self.worktree_changes.get(id).and_then(|(count, _)| *count)
+    }
+
+    /// The directory a checkout actually sits in, when that is not what
+    /// its branch name would lead you to expect — the ROOT WORKTREE and a
+    /// checkout whose folder is named after its branch say nothing.
+    ///
+    /// This is the one thing a branch-named row cannot tell you and the
+    /// one that costs the most to get wrong: a directory cut for one
+    /// ticket and later moved onto another branch reads as the branch on
+    /// screen while every path in it, and every editor tab already open,
+    /// still says the old ticket. Naming the directory where it disagrees
+    /// makes that visible without a second panel.
+    pub fn worktree_dir_label(&self, id: &WorktreeId) -> Option<String> {
+        let wt = self.tree.worktrees.iter().find(|w| &w.id == id)?;
+        if wt.is_main {
+            return None;
+        }
+        let dir = wt.path.file_name()?.to_string_lossy().into_owned();
+        // `feat/x` is checked out in `feat-x`: the same name, spelled the
+        // only way a directory can spell it.
+        let branch = wt.branch.replace('/', "-");
+        // The usual layout names the directory for the branch, or for the
+        // repo and the branch together — neither disagrees with the row.
+        if dir == branch || dir.ends_with(&format!("-{branch}")) {
+            return None;
+        }
+        Some(dir)
     }
 
     /// Whether a checkout is currently mixing its project's isolated
@@ -6082,5 +6173,46 @@ mod tests {
             .insert(w1.clone(), (true, std::time::Instant::now()));
         assert!(app.worktree_split(&w1));
         assert!(!app.worktree_split(&w2));
+    }
+
+    /// The directory label speaks only when the folder disagrees with the
+    /// branch — the case a branch-named row cannot show and the one that
+    /// costs the most: `dzt-3453/` carrying branch `dzt-3484-…`.
+    #[test]
+    fn a_checkouts_directory_is_named_only_when_it_disagrees() {
+        use nebula_core::entities::Worktree;
+        use nebula_core::ids::{ProjectId, WorktreeId};
+        let mut app = App::new();
+        let wt = |id: &str, path: &str, branch: &str, is_main: bool| Worktree {
+            id: WorktreeId(id.into()),
+            project_id: ProjectId("p1".into()),
+            path: path.into(),
+            branch: branch.into(),
+            is_main,
+            sort_order: 0,
+        };
+        app.tree.worktrees = vec![
+            // The trap: the folder says 3453, the branch says 3484.
+            wt(
+                "w1",
+                "/w/dz-frontend-dzt-3453",
+                "dzt-3484-pos-disable",
+                false,
+            ),
+            // The usual layouts, which say nothing.
+            wt("w2", "/w/dz-frontend-worktrees/dzt-3534", "dzt-3534", false),
+            wt("w3", "/w/dz-frontend-dzt-3535", "dzt-3535", false),
+            // A slashed branch spelled the only way a directory can.
+            wt("w4", "/w/someone-main", "someone/main", false),
+            // The root is marked by its own glyph; its folder is the repo.
+            wt("w5", "/w/dz-frontend", "dzt-3548-fix-flag", true),
+        ];
+        let label = |id: &str| app.worktree_dir_label(&WorktreeId(id.into()));
+        assert_eq!(label("w1").as_deref(), Some("dz-frontend-dzt-3453"));
+        assert_eq!(label("w2"), None, "named for its branch");
+        assert_eq!(label("w3"), None, "repo and branch together");
+        assert_eq!(label("w4"), None, "slashes cannot be a directory");
+        assert_eq!(label("w5"), None, "the root says nothing");
+        assert_eq!(label("gone"), None, "a checkout not in the tree");
     }
 }

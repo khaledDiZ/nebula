@@ -788,10 +788,19 @@ pub struct ProjectTab {
 /// prunes it.
 pub fn project_tabs(app: &App) -> Vec<ProjectTab> {
     let active = app.selected_project().map(|p| p.id.clone());
+    // Scoped to the FOLDER the grid's project sits in: the strip is the
+    // repos that live beside it on disk. A machine with one folder sees no
+    // difference; one with several stops mixing a client's four repos and
+    // a side project into one strip, and the digits keep meaning the same
+    // four tabs whichever of them you are on.
+    let folder = app.current_folder();
     app.launcher_tabs
         .iter()
         .filter_map(|id| {
             let p = app.tree.projects.iter().find(|p| &p.id == id)?;
+            if folder.as_ref().is_some_and(|f| &app.project_folder(p) != f) {
+                return None;
+            }
             Some(ProjectTab {
                 id: id.clone(),
                 name: p.name.clone(),
@@ -1788,5 +1797,94 @@ mod tests {
         );
         picker.select(5);
         assert_eq!(picker.selected, picker.matches.len() - 1);
+    }
+
+    /// A FOLDER is the directory a repo sits in, derived and never stored.
+    /// The tab strip is scoped to the folder of the project the grid is
+    /// on, so repos that live beside each other share a strip and a side
+    /// project in another directory never lands in it.
+    #[test]
+    fn the_tab_strip_is_scoped_to_the_folder_the_project_sits_in() {
+        let mut app = app();
+        // Three repos under one client folder, one unrelated project.
+        app.tree.projects = vec![
+            Project {
+                id: ProjectId("p1".into()),
+                name: "api".into(),
+                repo_path: "/w/Digitalzone/api".into(),
+                sort_order: 0,
+            },
+            Project {
+                id: ProjectId("p2".into()),
+                name: "web".into(),
+                repo_path: "/w/Digitalzone/web".into(),
+                sort_order: 1,
+            },
+            Project {
+                id: ProjectId("p3".into()),
+                name: "side".into(),
+                repo_path: "/w/nofakha/side".into(),
+                sort_order: 2,
+            },
+        ];
+        app.launcher_tabs = vec![
+            ProjectId("p1".into()),
+            ProjectId("p2".into()),
+            ProjectId("p3".into()),
+        ];
+        app.sel_project = 0;
+
+        assert_eq!(
+            app.current_folder_name().as_deref(),
+            Some("Digitalzone"),
+            "the folder of the project the grid is on"
+        );
+        let names =
+            |app: &App| -> Vec<String> { project_tabs(app).into_iter().map(|t| t.name).collect() };
+        assert_eq!(names(&app), ["api", "web"], "the side project is elsewhere");
+
+        // Standing in the other folder shows that folder's strip instead.
+        app.sel_project = 2;
+        assert_eq!(app.current_folder_name().as_deref(), Some("nofakha"));
+        assert_eq!(names(&app), ["side"]);
+    }
+
+    /// `{` / `}` swing the strip onto the next folder and land on its
+    /// first project, wrapping both ways. One folder has nowhere to go.
+    #[test]
+    fn folder_steps_wrap_and_do_nothing_with_a_single_folder() {
+        let mut app = app();
+        // The fixture's projects all sit in /tmp: one folder, no move.
+        assert_eq!(app.folders().len(), 1);
+        assert_eq!(app.project_in_folder_step(1), None, "nowhere to go");
+
+        app.tree.projects = vec![
+            Project {
+                id: ProjectId("p1".into()),
+                name: "api".into(),
+                repo_path: "/w/Digitalzone/api".into(),
+                sort_order: 0,
+            },
+            Project {
+                id: ProjectId("p2".into()),
+                name: "web".into(),
+                repo_path: "/w/Digitalzone/web".into(),
+                sort_order: 1,
+            },
+            Project {
+                id: ProjectId("p3".into()),
+                name: "side".into(),
+                repo_path: "/w/nofakha/side".into(),
+                sort_order: 2,
+            },
+        ];
+        app.sel_project = 0;
+        assert_eq!(app.folders().len(), 2);
+        // Forward lands on the other folder's first project, and wraps
+        // back to this folder's first — not to the project we started on.
+        assert_eq!(app.project_in_folder_step(1), Some(ProjectId("p3".into())));
+        assert_eq!(app.project_in_folder_step(-1), Some(ProjectId("p3".into())));
+        app.sel_project = 2;
+        assert_eq!(app.project_in_folder_step(1), Some(ProjectId("p1".into())));
     }
 }
