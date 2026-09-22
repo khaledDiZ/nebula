@@ -1948,6 +1948,11 @@ pub enum PendingIntent {
     },
     /// Select the added project and step into its Worktrees panel.
     SelectCreatedProject,
+    /// Give the added project a PROJECT TAB and leave the screen alone.
+    /// What the repos of a folder opened all at once get, bar the first:
+    /// each yanking the grid onto itself as its Ack landed would make
+    /// opening a folder a scramble of four projects fighting for it.
+    TabCreatedProject,
     /// The NEW WORKTREE modal's create. The stand-in row `placeholder`
     /// went up and took the cursor when Enter was pressed, exactly as the
     /// Ack used to leave the real row: the Ack only swaps the real id in.

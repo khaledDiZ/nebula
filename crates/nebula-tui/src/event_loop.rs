@@ -3608,13 +3608,41 @@ fn open_folder(app: &mut App, path: std::path::PathBuf, out: &mut Vec<ClientRequ
         let repos = repos_in_folder(&canon);
         if !repos.is_empty() {
             let found = repos.len();
-            for (i, repo) in repos.into_iter().enumerate() {
-                // Only the first moves the screen: the rest arrive behind
-                // it rather than each yanking the grid onto itself.
-                let intent = if i == 0 {
+            // A repo the daemon already holds needs opening, not adding:
+            // asking again is refused as a duplicate, which would turn
+            // "open my work folder" into a row of errors on a machine
+            // where the repos were added one at a time. Opening gives it
+            // the one thing it is missing — a tab.
+            let (known, fresh): (Vec<_>, Vec<_>) = repos
+                .into_iter()
+                .map(|repo| {
+                    let id = app.tree.project_at_path(&repo).map(|p| p.id.clone());
+                    (repo, id)
+                })
+                .partition(|(_, id)| id.is_some());
+            // A tab each, so the folder arrives whole in the header
+            // rather than one repo at a time as they are visited.
+            let mut opened = 0;
+            for (_, id) in &known {
+                let Some(id) = id else { continue };
+                if !app.launcher_tabs.contains(id) {
+                    app.launcher_tabs.push(id.clone());
+                    app.dirty = true;
+                }
+                // The first known repo is the one the grid lands on.
+                if opened == 0 {
+                    launcher::open_project(app, id, out);
+                }
+                opened += 1;
+            }
+            for (i, (repo, _)) in fresh.into_iter().enumerate() {
+                // Only the first moves the screen, and only when nothing
+                // known already took it: the rest take a tab and leave the
+                // grid where it is.
+                let intent = if i == 0 && opened == 0 {
                     PendingIntent::SelectCreatedProject
                 } else {
-                    PendingIntent::None
+                    PendingIntent::TabCreatedProject
                 };
                 send_with(app, out, intent, move |req_id| ClientRequest::AddProject {
                     req_id,
@@ -9913,6 +9941,15 @@ fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRe
                 ) => {
                     app.flash = Some(format!("■ stopped the run in {branch}"));
                 }
+                (Some(PendingIntent::TabCreatedProject), Some(EntityId::Project(id))) => {
+                    // A tab, and nothing else: the project is one keypress
+                    // away in the header without the grid ever leaving
+                    // where the user is looking.
+                    if !app.launcher_tabs.contains(&id) {
+                        app.launcher_tabs.push(id);
+                        app.dirty = true;
+                    }
+                }
                 (Some(PendingIntent::SelectCreatedProject), Some(EntityId::Project(id))) => {
                     // Its upsert usually lands just before this Ack; if not,
                     // stash the id and select once it does.
@@ -11947,6 +11984,48 @@ mod tests {
                 &folder.join("frontend"),
             ],
             "every checkout, in name order, and nothing else"
+        );
+        assert_eq!(app.flash.as_deref(), Some("Digitalzone: opening 3 repos"));
+    }
+
+    /// Repos the daemon already holds are opened, not added again: a
+    /// duplicate AddProject comes back refused, so a folder whose repos
+    /// were added one at a time would answer "open my work folder" with a
+    /// row of errors instead of the tabs it is asking for.
+    #[test]
+    fn a_folder_opens_the_repos_it_already_knows_and_adds_the_rest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let folder = root.join("Digitalzone");
+        for repo in ["backend", "frontend", "dashboards"] {
+            std::fs::create_dir_all(folder.join(repo).join(".git")).unwrap();
+        }
+        let mut app = App::new();
+        seed_tree(&mut app);
+        // One of the three is already a project; the other two are new.
+        app.tree.projects[0].repo_path = folder.join("backend");
+        let known = app.tree.projects[0].id.clone();
+
+        let mut out = Vec::new();
+        open_folder(&mut app, folder.clone(), &mut out);
+
+        let added: Vec<&std::path::PathBuf> = out
+            .iter()
+            .filter_map(|r| match r {
+                ClientRequest::AddProject { path, .. } => Some(path),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            added,
+            [&folder.join("dashboards"), &folder.join("frontend")],
+            "only the repos nobody holds yet are added"
+        );
+        // The one it already had is opened, which is what gives it a tab.
+        assert!(
+            app.launcher_tabs.contains(&known),
+            "{known:?} should have a tab: {:?}",
+            app.launcher_tabs
         );
         assert_eq!(app.flash.as_deref(), Some("Digitalzone: opening 3 repos"));
     }
