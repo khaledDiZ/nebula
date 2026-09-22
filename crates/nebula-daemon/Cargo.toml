@@ -18,9 +18,10 @@ tracing-subscriber = { workspace = true }
 ulid = { workspace = true }
 portable-pty = "0.9"
 rusqlite = { version = "0.40", features = ["bundled"] }
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 nix = { version = "0.31", features = ["process", "fs", "signal", "term"] }
 tokio-util = "0.7"
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 rand = "0.10"
 subtle = "2"
 tempfile = "3"

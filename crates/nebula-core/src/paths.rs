@@ -35,6 +35,19 @@ pub fn pidfile_path() -> PathBuf {
     runtime_dir().join("daemon.pid")
 }
 
+/// Where the daemon publishes the GATEWAY's port and bearer token, for a
+/// local client that speaks WebSocket rather than the unix socket — the
+/// editor extension, or a browser page.
+///
+/// It sits in the runtime dir beside the socket because it is exactly as
+/// sensitive: whoever reads it can drive every session, which is to say run
+/// commands as this user. The directory is already mode 0700, and the file
+/// is written 0600, so the token never leaves this account. It is rewritten
+/// each boot, like the hook receiver's, so a stale one opens nothing.
+pub fn gateway_path() -> PathBuf {
+    runtime_dir().join("gateway.json")
+}
+
 /// Fingerprint of the binary the running daemon was launched from, written
 /// by the daemon at startup. Installers compare it against the binary they
 /// just installed to tell an up-to-date daemon from a stale one.

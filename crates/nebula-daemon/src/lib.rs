@@ -1,6 +1,7 @@
 pub mod attach;
 pub mod claude_bg;
 pub mod config;
+pub mod gateway;
 pub mod git;
 pub mod hooks;
 pub mod lifecycle;
@@ -89,6 +90,15 @@ async fn serve() -> Result<()> {
     tracing::info!(port = hook_env.port, "hook receiver listening");
 
     let daemon = registry::Daemon::new(store, hook_env);
+
+    // The GATEWAY: the same protocol over a WebSocket, for the editor
+    // extension and anything else that is not the TUI. Loopback only, and
+    // never load-bearing — the unix socket is the primary transport, so a
+    // gateway that cannot bind is a warning and not a dead daemon.
+    match gateway::start(daemon.clone()).await {
+        Ok(info) => tracing::info!(port = info.port, "gateway listening"),
+        Err(e) => tracing::warn!(error = %e, "gateway did not start"),
+    }
 
     // Drain hook events into the status machines; a payload that reports a
     // cwd inside another worktree of the same project re-homes the agent row.
@@ -194,11 +204,23 @@ async fn serve() -> Result<()> {
                     _ = daemon.shutdown.cancelled() => break,
                     _ = interval.tick() => {}
                 }
-                let Ok((projects, _, _, _)) = daemon.store.load_tree() else {
+                let Ok((projects, worktrees, _, _)) = daemon.store.load_tree() else {
                     continue;
                 };
                 seen.retain(|id, _| projects.iter().any(|p| &p.id == id));
                 for project in projects {
+                    // A FOLDER PROJECT has no git to sync, and its probe is
+                    // unreadable forever — which by the rule below is never
+                    // cached, so it would spend a `git worktree list` every
+                    // tick for the life of the daemon and warn on each one.
+                    // Its single checkout is the folder, and nothing but
+                    // this loop would ever change it.
+                    if worktrees.iter().any(|w| {
+                        w.project_id == project.id
+                            && w.branch == nebula_core::entities::FOLDER_BRANCH
+                    }) {
+                        continue;
+                    }
                     // An unreadable probe is not a fingerprint: caching it
                     // would compare equal on every later tick and retire the
                     // project from syncing for the life of the daemon. Only a
@@ -288,6 +310,7 @@ async fn serve() -> Result<()> {
     // Cleanup: kill PTYs, remove the socket. (Status persistence joins in
     // phase 4/5 when the store exists.)
     daemon.kill_all();
+    gateway::unpublish();
     let _ = std::fs::remove_file(&sock);
     drop(lock);
     tracing::info!("daemon exited cleanly");

@@ -35,6 +35,9 @@ pub async fn accept_loop(daemon: Arc<Daemon>, listener: UnixListener) {
     }
 }
 
+/// One client on the unix socket: length-prefixed MessagePack both ways.
+/// The framing is all that is here — everything past it is [`serve_client`],
+/// which no transport reaches into.
 async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
     let (read_half, write_half) = stream.into_split();
     let mut reader = tokio::io::BufReader::new(read_half);
@@ -52,12 +55,38 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
         let _ = w.shutdown().await;
     });
 
+    // Frames in, on a task of their own, so the core reads requests from a
+    // channel and never knows what carried them.
+    let (req_tx, req_rx) = mpsc::channel::<ClientRequest>(64);
+    let reader_task = tokio::spawn(async move {
+        while let Ok(Some(req)) = read_frame::<ClientRequest, _>(&mut reader).await {
+            if req_tx.send(req).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let result = serve_client(daemon, req_rx, out_tx).await;
+    reader_task.abort();
+    let _ = writer_task.await;
+    result
+}
+
+/// The daemon's half of a client session, with no transport in it: requests
+/// arrive on `req_rx` and events leave through `out_tx`, whether those came
+/// off a unix socket or a WebSocket. Returns when the request stream ends,
+/// having detached everything this connection had attached.
+pub(crate) async fn serve_client(
+    daemon: Arc<Daemon>,
+    mut req_rx: mpsc::Receiver<ClientRequest>,
+    out_tx: mpsc::Sender<ServerEvent>,
+) -> Result<()> {
     // Per-connection attach state: forward-task handles keyed by session.
     let mut attached: HashMap<SessionRef, tokio::task::JoinHandle<()>> = HashMap::new();
     let mut handshaken = false;
 
     let result: Result<()> = async {
-        while let Some(req) = read_frame::<ClientRequest, _>(&mut reader).await? {
+        while let Some(req) = req_rx.recv().await {
             match req {
                 ClientRequest::Hello { protocol_version } => {
                     handshaken = protocol_version == PROTOCOL_VERSION;
@@ -591,7 +620,6 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
         daemon.note_detached(&sref);
     }
     drop(out_tx);
-    let _ = writer_task.await;
     result
 }
 
