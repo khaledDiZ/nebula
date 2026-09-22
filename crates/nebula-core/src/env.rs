@@ -48,6 +48,46 @@ pub const UPDATE_CHECK_SECS: &str = "NEBULA_UPDATE_CHECK_SECS";
 /// every agent PTY and must never leak into plain terminals.
 pub const AGENT_SESSION_VARS: &[&str] = &[AGENT_ID, API_URL, API_TOKEN];
 
+/// The host Claude Code session's own markers, scrubbed from every agent
+/// the daemon spawns.
+///
+/// A daemon started from inside a Claude Code session — an agent that ran
+/// `nebula`, a terminal inside the editor extension — inherits these, and
+/// every CLI it then spawns reads them as "you are a child of that
+/// session". Claude Code answers by turning transcript saving **off** and
+/// recording no session id of its own, which costs far more than it
+/// sounds: the transcript is what a client reads to show the conversation,
+/// and the session id is what `--resume` needs. Without them a session
+/// cannot be resumed, and nebula's whole promise is that a session
+/// survives the client.
+///
+/// A session nebula starts is its own session, whatever launched the
+/// daemon, so the parent's identity is removed rather than passed on. The
+/// messaging socket and token go with it: they address the parent's IPC,
+/// which this child has no business reaching.
+pub const HOST_AGENT_SESSION_VARS: &[&str] = &[
+    "CLAUDECODE",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_ENTRYPOINT",
+];
+
+/// Everything scrubbed from an agent's PTY: nebula's own session vars and
+/// the host Claude Code session's markers.
+pub const SPAWN_SCRUB_VARS: &[&str] = &[
+    AGENT_ID,
+    API_URL,
+    API_TOKEN,
+    "CLAUDECODE",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_ENTRYPOINT",
+];
+
 /// `TERM` every PTY child is given. The pane is nebula's own grid — a vt100
 /// parser the TUI repaints through ratatui — and that grid keeps 24-bit
 /// colour whatever terminal nebula itself runs in, so the child never

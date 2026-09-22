@@ -2585,7 +2585,7 @@ impl Daemon {
                 ),
                 (env::API_TOKEN.into(), self.hook_env.token.clone()),
             ],
-            scrub_env: env::AGENT_SESSION_VARS,
+            scrub_env: env::SPAWN_SCRUB_VARS,
             cols,
             rows,
         };
@@ -2768,7 +2768,7 @@ impl Daemon {
             args,
             cwd: worktree.path.clone(),
             env: vec![],
-            scrub_env: env::AGENT_SESSION_VARS,
+            scrub_env: env::SPAWN_SCRUB_VARS,
             cols,
             rows,
         };
@@ -5715,6 +5715,30 @@ mod tests {
     /// the project: named after the branch directory, `repo_path` pointing at
     /// it, and a ⌂ root row for a directory the project did not own. The repo
     /// is the project no matter which of its checkouts you add it from.
+    /// A daemon launched from inside a Claude Code session inherits that
+    /// session's markers, and a CLI that sees them turns its transcript off
+    /// and records no session id — so the conversation cannot be read back
+    /// and the session cannot be resumed, which is the one thing nebula
+    /// promises. Every agent spawn scrubs them.
+    #[test]
+    fn an_agent_spawn_scrubs_the_host_claude_session() {
+        let scrubbed = nebula_core::env::SPAWN_SCRUB_VARS;
+        for marker in nebula_core::env::HOST_AGENT_SESSION_VARS {
+            assert!(
+                scrubbed.contains(marker),
+                "{marker} must not reach a spawned agent"
+            );
+        }
+        // nebula's own session vars are still scrubbed, as they always were.
+        for own in nebula_core::env::AGENT_SESSION_VARS {
+            assert!(scrubbed.contains(own), "{own} is still scrubbed");
+        }
+        // The marker that actually disables the transcript is the one that
+        // matters most; name it so a future edit cannot quietly drop it.
+        assert!(scrubbed.contains(&"CLAUDE_CODE_CHILD_SESSION"));
+        assert!(scrubbed.contains(&"CLAUDECODE"));
+    }
+
     #[tokio::test]
     async fn add_project_from_inside_a_worktree_roots_at_the_repo() {
         let tmp = tempfile::tempdir().unwrap();
