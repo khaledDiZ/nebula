@@ -1248,6 +1248,17 @@ pub struct ProjectSettings {
     /// that panel cuts a fresh worktree with this on or off — that is the
     /// panel's doing, not this switch's.)
     pub hide_root_worktree: bool,
+    /// SPLIT GUARD: repo-relative path patterns whose changes must travel
+    /// in a change of their own — `prisma/migrations` for a project whose
+    /// migrations deploy separately from the code that uses them. A
+    /// checkout whose change touches both one of these and anything else
+    /// is badged in the WORKTREES PANEL, so the rule is broken visibly
+    /// rather than at review time. A bare path means that path and
+    /// everything under it; `*` spans one segment and `**` any number.
+    /// Empty — the default — turns the guard off and skips its git
+    /// entirely. See [`crate::split_guard`].
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub isolate_paths: Vec<String>,
     /// Keys in the entry this build doesn't know — a newer nebula's, most
     /// likely — carried through a save untouched, as the file's top-level
     /// keys are. An entry holding one is never dropped as "all default".

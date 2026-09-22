@@ -39,6 +39,7 @@ pub mod raw_attach;
 pub mod remote;
 pub mod review;
 pub mod splash;
+pub mod split_guard;
 pub mod syntax;
 pub mod text_input;
 pub mod theme;

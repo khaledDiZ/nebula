@@ -292,6 +292,9 @@ async fn main_loop(
     // tick; its counts land in `app.worktree_changes` (and its line counts
     // in `app.worktree_lines`) and nowhere else.
     let (sweep_git_tx, mut sweep_git_rx) = tokio::sync::mpsc::unbounded_channel::<SweptChanges>();
+    // The SPLIT GUARD's read of one checkout per tick, for projects that
+    // named `isolate_paths`; verdicts land in `app.worktree_splits`.
+    let (split_tx, mut split_rx) = tokio::sync::mpsc::unbounded_channel::<(WorktreeId, bool)>();
     // Pull-request lookups run off the loop (they hit the network); answers
     // come back here and land in `app.pull_requests`.
     let (pr_tx, mut pr_rx) = tokio::sync::mpsc::unbounded_channel::<(WorktreeId, Lookup)>();
@@ -393,6 +396,7 @@ async fn main_loop(
             _ = tokio::time::sleep_until(next_git_poll) => {
                 request_git_changes(&mut app, &git_tx);
                 sweep_git_changes(&mut app, &sweep_git_tx);
+                sweep_split_guard(&mut app, &split_tx);
                 // Rides the git tick rather than the repaint, so walking the
                 // worktree list with j/k can't spawn a `gh` per row passed —
                 // only whatever the selection is resting on when it fires,
@@ -586,6 +590,12 @@ async fn main_loop(
                 if let Some((worktree, count, lines)) = answer {
                     note_worktree_lines(&mut app, &worktree, lines);
                     land_swept_changes(&mut app, worktree, count);
+                }
+            }
+            answer = split_rx.recv() => {
+                // Never None: `split_tx` lives as long as the loop.
+                if let Some((worktree, split)) = answer {
+                    land_split_verdict(&mut app, worktree, split);
                 }
             }
             answer = prs_rx.recv() => {
@@ -918,6 +928,83 @@ fn changes_sweep_target(app: &App) -> Option<(WorktreeId, std::path::PathBuf)> {
 fn land_swept_changes(app: &mut App, worktree: WorktreeId, count: Option<usize>) {
     app.worktree_changes_inflight = None;
     note_worktree_changes(app, worktree, count);
+}
+
+/// The base every SPLIT GUARD diff is taken against: origin's fetched copy
+/// of the WORKTREE BASE BRANCH, or of origin's own default branch when the
+/// setting is empty — the same ref a new worktree would have been cut from,
+/// which is what makes "what this branch added" mean anything.
+fn split_guard_base() -> String {
+    match crate::config::Config::load().worktree_base_branch.trim() {
+        "" => "origin/HEAD".to_string(),
+        name => format!("origin/{}", name.trim_start_matches("origin/")),
+    }
+}
+
+/// Read one checkout's SPLIT GUARD verdict off the loop — does its change
+/// mix the project's isolated paths with anything else. Selected checkout
+/// first, then the least recently read of the rest, one per tick and none
+/// while the last is still out. A project that named no `isolate_paths`
+/// is skipped before any git runs, so the guard costs nothing until it is
+/// asked for. The answer lands in `land_split_verdict`.
+fn sweep_split_guard(app: &mut App, tx: &tokio::sync::mpsc::UnboundedSender<(WorktreeId, bool)>) {
+    if app.worktree_split_inflight.is_some() {
+        return;
+    }
+    let Some((id, path, patterns)) = split_sweep_target(app) else {
+        return;
+    };
+    app.worktree_split_inflight = Some(id.clone());
+    let tx = tx.clone();
+    let base = split_guard_base();
+    tokio::task::spawn_blocking(move || {
+        let split = crate::split_guard::verdict(&path, &base, &patterns)
+            .map(|v| v.is_split())
+            .unwrap_or(false);
+        let _ = tx.send((id, split));
+    });
+}
+
+/// The checkout the guard spends this tick on: the selected one when it is
+/// due, else the guarded checkout read least recently — never read at all
+/// first. Only checkouts whose project named `isolate_paths` are eligible.
+fn split_sweep_target(app: &App) -> Option<(WorktreeId, std::path::PathBuf, Vec<String>)> {
+    let selected = app.selected_worktree().map(|w| w.id.clone());
+    let eligible: Vec<&nebula_core::entities::Worktree> = app
+        .tree
+        .worktrees
+        .iter()
+        .filter(|w| !app.isolate_paths_for(&w.id).is_empty())
+        .collect();
+    // The selection is what the user is looking at, so it goes first once
+    // its reading is the oldest — otherwise a long list would starve it.
+    let pick = eligible
+        .iter()
+        .filter(|w| Some(&w.id) == selected.as_ref())
+        .find(|w| {
+            app.worktree_splits
+                .get(&w.id)
+                .is_none_or(|(_, at)| at.elapsed() >= std::time::Duration::from_secs(2))
+        })
+        .or_else(|| {
+            eligible
+                .iter()
+                .min_by_key(|w| app.worktree_splits.get(&w.id).map(|(_, at)| *at))
+        })?;
+    let patterns = app.isolate_paths_for(&pick.id);
+    Some((pick.id.clone(), pick.path.clone(), patterns))
+}
+
+/// Land a guard verdict: frees the slot, stamps the read, and redraws when
+/// the answer changed.
+fn land_split_verdict(app: &mut App, worktree: WorktreeId, split: bool) {
+    app.worktree_split_inflight = None;
+    let before = app
+        .worktree_splits
+        .insert(worktree, (split, std::time::Instant::now()));
+    if before.map(|(was, _)| was) != Some(split) {
+        app.dirty = true;
+    }
 }
 
 /// `request_git_changes` and `land_git_changes` in one synchronous step,

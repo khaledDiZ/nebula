@@ -3461,6 +3461,13 @@ pub struct App {
     /// print after `+3 files`. Only a checkout with changed lines has an
     /// entry.
     pub worktree_lines: HashMap<WorktreeId, crate::git_diff::LineChanges>,
+    /// SPLIT GUARD verdicts: whether each checkout's change currently
+    /// mixes a project's `isolate_paths` with anything else, and when it
+    /// was read. Only projects that named such paths get an entry — the
+    /// guard's git never runs for the rest. See [`crate::split_guard`].
+    pub worktree_splits: HashMap<WorktreeId, (bool, std::time::Instant)>,
+    /// The checkout the guard is reading right now; its answer clears it.
+    pub worktree_split_inflight: Option<WorktreeId>,
     /// Mirrors CONFIG.JSON's `card_line_changes` (Settings → Appearance):
     /// the reads behind `worktree_lines` run, and the cards print them,
     /// only while it is on.
@@ -3776,6 +3783,8 @@ impl App {
             git_changes_inflight: None,
             worktree_changes: HashMap::new(),
             worktree_changes_inflight: None,
+            worktree_splits: HashMap::new(),
+            worktree_split_inflight: None,
             worktree_lines: HashMap::new(),
             card_line_changes: false,
             pull_requests: HashMap::new(),
@@ -4442,6 +4451,28 @@ impl App {
     /// one has been read there, or when git couldn't say.
     pub fn worktree_changes(&self, id: &WorktreeId) -> Option<usize> {
         self.worktree_changes.get(id).and_then(|(count, _)| *count)
+    }
+
+    /// Whether a checkout is currently mixing its project's isolated
+    /// paths with other work. False until the guard has read it, and for
+    /// every project that never named any.
+    pub fn worktree_split(&self, id: &WorktreeId) -> bool {
+        self.worktree_splits
+            .get(id)
+            .is_some_and(|(split, _)| *split)
+    }
+
+    /// The isolate patterns in force for the project a checkout belongs
+    /// to; empty when the project named none, which is what turns the
+    /// guard off for it.
+    pub fn isolate_paths_for(&self, worktree: &WorktreeId) -> Vec<String> {
+        let Some(wt) = self.tree.worktrees.iter().find(|w| &w.id == worktree) else {
+            return Vec::new();
+        };
+        let Some(project) = self.tree.projects.iter().find(|p| p.id == wt.project_id) else {
+            return Vec::new();
+        };
+        self.project_settings(project).isolate_paths.clone()
     }
 
     /// A checkout's last-read line counts, for its cards: None while CARD
@@ -5982,5 +6013,74 @@ mod tests {
                 p.id
             );
         }
+    }
+
+    /// The guard is per project and opt-in: a checkout under a project
+    /// that named `isolate_paths` is eligible, one under a project that
+    /// did not is skipped before any git runs, and an unread checkout
+    /// reports no split rather than a stale one.
+    #[test]
+    fn isolate_paths_are_looked_up_per_project_and_default_to_none() {
+        use nebula_core::entities::{Project, Worktree};
+        use nebula_core::ids::{ProjectId, WorktreeId};
+        let mut app = App::new();
+        app.tree.projects = vec![
+            Project {
+                id: ProjectId("p1".into()),
+                name: "api".into(),
+                repo_path: "/w/api".into(),
+                sort_order: 0,
+            },
+            Project {
+                id: ProjectId("p2".into()),
+                name: "web".into(),
+                repo_path: "/w/web".into(),
+                sort_order: 1,
+            },
+        ];
+        app.tree.worktrees = vec![
+            Worktree {
+                id: WorktreeId("w1".into()),
+                project_id: ProjectId("p1".into()),
+                path: "/w/api".into(),
+                branch: "main".into(),
+                is_main: true,
+                sort_order: 0,
+            },
+            Worktree {
+                id: WorktreeId("w2".into()),
+                project_id: ProjectId("p2".into()),
+                path: "/w/web".into(),
+                branch: "main".into(),
+                is_main: true,
+                sort_order: 0,
+            },
+        ];
+        app.projects_config.insert(
+            "/w/api".into(),
+            crate::config::ProjectSettings {
+                isolate_paths: vec!["prisma/migrations".into()],
+                ..Default::default()
+            },
+        );
+
+        let w1 = WorktreeId("w1".into());
+        let w2 = WorktreeId("w2".into());
+        assert_eq!(app.isolate_paths_for(&w1), ["prisma/migrations"]);
+        assert!(
+            app.isolate_paths_for(&w2).is_empty(),
+            "a project that never asked for the guard"
+        );
+        assert!(
+            app.isolate_paths_for(&WorktreeId("gone".into())).is_empty(),
+            "a worktree that is not in the tree"
+        );
+
+        // Nothing read yet is not a split.
+        assert!(!app.worktree_split(&w1));
+        app.worktree_splits
+            .insert(w1.clone(), (true, std::time::Instant::now()));
+        assert!(app.worktree_split(&w1));
+        assert!(!app.worktree_split(&w2));
     }
 }

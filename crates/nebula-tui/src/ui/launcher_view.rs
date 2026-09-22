@@ -781,6 +781,17 @@ fn draw_card(
             second.push(Span::styled(removed, Style::default().fg(quiet_or(th.err))));
         }
     }
+    // The SPLIT GUARD's verdict rides at the end of the same line, in the
+    // error color: this checkout's change carries paths the project said
+    // must ship alone *and* other work, so it cannot go out as one pull
+    // request. Silent for every checkout that is fine and every project
+    // that never named any such path.
+    if app.worktree_split(&a.worktree_id) {
+        second.push(Span::styled(
+            " ⚠ split",
+            Style::default().fg(quiet_or(th.err)),
+        ));
+    }
     if !harness.is_empty() {
         second.push(Span::styled(" · ", Style::default().fg(quiet_or(th.dim))));
         second.push(Span::styled(harness, Style::default().fg(quiet_or(th.dim))));
