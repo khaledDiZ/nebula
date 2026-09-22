@@ -22,6 +22,20 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
+/// The repos sitting directly in `dir` — one level, the same rule the
+/// client uses when it opens a folder of repos. A directory holding none
+/// is not a work folder, just a directory, and gets git's own refusal.
+fn folder_repos(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.join(".git").is_dir())
+        .collect()
+}
+
 /// A warm agent CLI older than this is reaped — it holds memory and its
 /// conversation context grows stale.
 const PREWARM_MAX_AGE: Duration = Duration::from_secs(15 * 60);
@@ -611,6 +625,20 @@ impl Daemon {
         // "not a git repository" is the right explanation only when git ran and
         // said no — if git itself is missing, that message blames the wrong
         // thing, so let git.rs's own diagnosis through untouched.
+        // A FOLDER PROJECT: a directory that is no checkout itself but
+        // holds them — the folder a team keeps its repos side by side in.
+        // It exists so a session can run *across* those repos, with the
+        // folder as its working directory, which a checkout-scoped session
+        // cannot do. It is a project with one checkout, itself, so nothing
+        // downstream needs to know: the agent, the grid, the tabs and the
+        // database all see the shape they already handle.
+        //
+        // Only a folder that actually holds repos qualifies, so a mistyped
+        // path still gets git's own "not a git repository" rather than a
+        // project made out of the typo.
+        if git::repo_toplevel(path).await.is_err() && !folder_repos(path).is_empty() {
+            return self.add_folder_project(path, name).await;
+        }
         let toplevel = git::repo_toplevel(path).await.map_err(|e| {
             if git::is_missing(&e) {
                 e
@@ -667,6 +695,51 @@ impl Daemon {
                 entity: Entity::Worktree(worktree),
             });
         }
+        Ok(EntityId::Project(project.id))
+    }
+
+    /// Register a FOLDER PROJECT: the directory itself, with one checkout
+    /// row that is also the directory. No git runs against it — the
+    /// WORKTREE SYNC's mtime probe finds no `.git` to watch, and the
+    /// reconcile behind it bails on `git worktree list` before it touches
+    /// a row, so the synthetic checkout is never swept away.
+    async fn add_folder_project(
+        self: &Arc<Self>,
+        path: &Path,
+        name: Option<String>,
+    ) -> Result<EntityId> {
+        let path = tokio::fs::canonicalize(path)
+            .await
+            .unwrap_or_else(|_| path.to_path_buf());
+        if self.store.project_by_path(&path)?.is_some() {
+            bail!("project already added: {}", path.display());
+        }
+        let name = name.unwrap_or_else(|| Project::folder_name(&path));
+        let project = Project {
+            id: ProjectId::generate(),
+            name,
+            repo_path: path.clone(),
+            sort_order: self.store.next_project_sort_order()?,
+        };
+        self.store.insert_project(&project)?;
+        self.broadcast(ServerEvent::EntityUpserted {
+            entity: Entity::Project(project.clone()),
+        });
+        // Its one checkout is the folder. `is_main` so it wears the root
+        // glyph and no key offers to cut a worktree from it or switch its
+        // branch — there is no branch here to switch.
+        let worktree = Worktree {
+            id: WorktreeId::generate(),
+            project_id: project.id.clone(),
+            is_main: true,
+            path,
+            branch: nebula_core::entities::FOLDER_BRANCH.into(),
+            sort_order: 0,
+        };
+        self.store.insert_worktree(&worktree)?;
+        self.broadcast(ServerEvent::EntityUpserted {
+            entity: Entity::Worktree(worktree),
+        });
         Ok(EntityId::Project(project.id))
     }
 

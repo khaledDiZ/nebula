@@ -3651,12 +3651,27 @@ fn open_folder(app: &mut App, path: std::path::PathBuf, out: &mut Vec<ClientRequ
                     create_missing: false,
                 });
             }
+            // And the folder itself, as a FOLDER PROJECT: one checkout,
+            // the directory, so a session can be started across every repo
+            // in it rather than inside one of them. It takes a tab beside
+            // the repos it holds and never steals the grid.
+            if app.tree.project_at_path(&canon).is_none() {
+                let folder = canon.clone();
+                send_with(app, out, PendingIntent::TabCreatedProject, move |req_id| {
+                    ClientRequest::AddProject {
+                        req_id,
+                        path: folder,
+                        name: None,
+                        create_missing: false,
+                    }
+                });
+            }
             let name = canon
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| canon.to_string_lossy().into_owned());
             app.flash = Some(format!(
-                "{name}: opening {found} {}",
+                "{name}: opening {found} {} and the folder itself",
                 if found == 1 { "repo" } else { "repos" }
             ));
             return;
@@ -11982,10 +11997,16 @@ mod tests {
                 &folder.join("backend"),
                 &folder.join("dashboards"),
                 &folder.join("frontend"),
+                // And the folder itself, as the FOLDER PROJECT a session
+                // can run across all three from.
+                &folder,
             ],
-            "every checkout, in name order, and nothing else"
+            "every checkout in name order, then the folder"
         );
-        assert_eq!(app.flash.as_deref(), Some("Digitalzone: opening 3 repos"));
+        assert_eq!(
+            app.flash.as_deref(),
+            Some("Digitalzone: opening 3 repos and the folder itself")
+        );
     }
 
     /// Repos the daemon already holds are opened, not added again: a
@@ -12018,8 +12039,12 @@ mod tests {
             .collect();
         assert_eq!(
             added,
-            [&folder.join("dashboards"), &folder.join("frontend")],
-            "only the repos nobody holds yet are added"
+            [
+                &folder.join("dashboards"),
+                &folder.join("frontend"),
+                &folder,
+            ],
+            "the repos nobody holds yet, then the folder itself"
         );
         // The one it already had is opened, which is what gives it a tab.
         assert!(
@@ -12027,7 +12052,10 @@ mod tests {
             "{known:?} should have a tab: {:?}",
             app.launcher_tabs
         );
-        assert_eq!(app.flash.as_deref(), Some("Digitalzone: opening 3 repos"));
+        assert_eq!(
+            app.flash.as_deref(),
+            Some("Digitalzone: opening 3 repos and the folder itself")
+        );
     }
 
     /// A folder with no repos under it is still passed through as one

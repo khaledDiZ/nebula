@@ -151,6 +151,15 @@ impl Project {
     }
 }
 
+/// The branch a FOLDER PROJECT's one checkout carries — the work folder
+/// itself, registered so a session can run across every repo in it.
+///
+/// It is a sentinel, not a branch, and the space is what makes it safe:
+/// git refuses a ref name containing one, so no real checkout can ever
+/// report this and be mistaken for a folder. Kept here because the daemon
+/// writes it and the client reads it, and both must mean the same thing.
+pub const FOLDER_BRANCH: &str = "all repos";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Worktree {
     pub id: WorktreeId,

@@ -3983,11 +3983,33 @@ impl App {
     /// the way a hand-managed group can, needs no schema and no migration,
     /// and a repo moved on disk simply belongs to its new folder.
     pub fn project_folder(&self, project: &Project) -> PathBuf {
+        // A FOLDER PROJECT *is* the folder, so it belongs to itself rather
+        // than to whatever directory happens to hold it — otherwise the
+        // one project that exists to gather a folder's repos would sit in
+        // a different strip from every one of them.
+        if self.is_folder_project(project) {
+            return project.repo_path.clone();
+        }
         project
             .repo_path
             .parent()
             .map(std::path::Path::to_path_buf)
             .unwrap_or_else(|| project.repo_path.clone())
+    }
+
+    /// A FOLDER PROJECT: the work folder itself, registered so a session
+    /// can run across every repo in it rather than inside one of them.
+    ///
+    /// Told by its one checkout's sentinel branch, never by asking the
+    /// disk: this is read while drawing every frame, and a `stat` per
+    /// project per frame would be paid forever to answer a question that
+    /// cannot change while the row exists — and would answer it wrongly
+    /// for a repo on a volume that happens to be unmounted.
+    pub fn is_folder_project(&self, project: &Project) -> bool {
+        self.tree
+            .worktrees
+            .iter()
+            .any(|w| w.project_id == project.id && w.branch == nebula_core::entities::FOLDER_BRANCH)
     }
 
     /// The folder the header is scoped to: the one holding the project the
@@ -6291,5 +6313,62 @@ mod tests {
         assert!(!away("claude"), "inside the repo is still in the folder");
         assert!(away("tmp"), "a temp directory is not the work folder");
         assert!(!away("gone"), "a checkout not in the tree");
+    }
+
+    /// A FOLDER PROJECT belongs to itself, so it shares a tab strip with
+    /// the repos it gathers rather than sitting one level up with whatever
+    /// else happens to live beside the work folder.
+    #[test]
+    fn a_folder_project_is_its_own_folder() {
+        use nebula_core::entities::{Project, Worktree, FOLDER_BRANCH};
+        use nebula_core::ids::{ProjectId, WorktreeId};
+        let mut app = App::new();
+        app.tree.projects = vec![
+            Project {
+                id: ProjectId("p1".into()),
+                name: "backend".into(),
+                repo_path: "/w/Digitalzone/backend".into(),
+                sort_order: 0,
+            },
+            Project {
+                id: ProjectId("pf".into()),
+                name: "Digitalzone".into(),
+                repo_path: "/w/Digitalzone".into(),
+                sort_order: 1,
+            },
+        ];
+        app.tree.worktrees = vec![
+            Worktree {
+                id: WorktreeId("w1".into()),
+                project_id: ProjectId("p1".into()),
+                path: "/w/Digitalzone/backend".into(),
+                branch: "main".into(),
+                is_main: true,
+                sort_order: 0,
+            },
+            Worktree {
+                id: WorktreeId("wf".into()),
+                project_id: ProjectId("pf".into()),
+                path: "/w/Digitalzone".into(),
+                branch: FOLDER_BRANCH.into(),
+                is_main: true,
+                sort_order: 0,
+            },
+        ];
+        let repo = &app.tree.projects[0];
+        let folder = &app.tree.projects[1];
+        assert!(!app.is_folder_project(repo));
+        assert!(app.is_folder_project(folder));
+        // Both answer to the same folder, so both sit on one strip.
+        assert_eq!(
+            app.project_folder(repo),
+            std::path::PathBuf::from("/w/Digitalzone")
+        );
+        assert_eq!(
+            app.project_folder(folder),
+            std::path::PathBuf::from("/w/Digitalzone"),
+            "itself, not /w"
+        );
+        assert_eq!(app.folders().len(), 1, "one strip, not two");
     }
 }
